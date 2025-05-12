@@ -1,11 +1,11 @@
 [project]
-name = "mcp-proxy"
-description = "A MCP server which proxies requests to a remote MCP server over SSE transport."
+name = "mcp-mqtt-proxy"
+description = "A proxy server to bridge Model Context Protocol (MCP) between stdio and MQTT v5."
 authors = [{ name = "Sergey Parfenyuk", email = "sergey.parfenyuk@gmail.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
@@ -23,13 +23,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities",
+    "Topic :: Communications",
+    "Topic :: Internet",
     "Typing :: Typed",
 ]
-version = "0.5.1"
+version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.8.0,<2.0.0",
-    "uvicorn>=0.34.0"
+    "aiomqtt>=2.0.0,<3.0.0",
 ]
 
 [build-system]
@@ -37,14 +39,13 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project.urls]
-Homepage = "https://github.com/sparfenyuk/mcp-proxy"
-Source = "https://github.com/sparfenyuk/mcp-proxy"
-Documentation = "https://github.com/sparfenyuk/mcp-proxy"
-Changelog = "https://github.com/sparfenyuk/mcp-proxy/releases"
+Homepage = "https://github.com/bytter/mcp-mqtt-proxy"
+Source = "https://github.com/bytter/mcp-mqtt-proxy"
+Documentation = "https://github.com/bytter/mcp-mqtt-proxy"
+Changelog = "https://github.com/bytter/mcp-mqtt-proxy/releases"
 
 [project.scripts]
-mcp-proxy = "mcp_proxy.__main__:main"
-mcp-reverse-proxy = "mcp_proxy.__main__:client"
+mcp-mqtt-proxy = "mcp_mqtt_proxy.__main__:main"
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
@@ -95,9 +96,9 @@ warn_unused_ignores = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "EM101",  # Exception must not use a string literal, assign to variable first
-    "TRY003", # Avoid specifying long messages outside the exception class
-    "ERA001", # Found commented-out code
+    "EM101",
+    "TRY003",
+    "ERA001",
 ]
 
 [tool.ruff.lint.per-file-ignores]

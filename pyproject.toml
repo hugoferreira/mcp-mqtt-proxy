@@ -1,7 +1,7 @@
 [project]
 name = "mcp-mqtt-proxy"
 description = "A proxy server to bridge Model Context Protocol (MCP) between stdio and MQTT v5."
-authors = [{ name = "Sergey Parfenyuk", email = "sergey.parfenyuk@gmail.com" }]
+authors = [{ name = "Hugo Sereno Ferreira", email = "bytter@gmail.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
 classifiers = [

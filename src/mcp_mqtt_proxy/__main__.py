@@ -1,10 +1,4 @@
-"""The entry point for the mcp-proxy application. It sets up the logging and runs the main function.
-
-Two ways to run the application:
-1. Run the application as a module `uv run -m mcp_proxy`
-2. Run the application as a package `uv run mcp-proxy`
-
-"""
+"""The entry point for the mcp-mqtt-proxy application."""
 
 import argparse
 import asyncio
@@ -12,177 +6,191 @@ import logging
 import os
 import sys
 import typing as t
+import uuid
 
 from mcp.client.stdio import StdioServerParameters
 
-from .mcp_server import MCPServerSettings, run_mcp_server
-from .sse_client import run_sse_client
+# Placeholders for future imports
+# from .mqtt_listener import MQTTListenerSettings, run_mqtt_listener
+# from .mqtt_publisher import run_mqtt_publisher
 
-SSE_URL: t.Final[str | None] = os.getenv(
-    "SSE_URL",
-    None,
-)
+# Remove SSE_URL related code
+# SSE_URL: t.Final[str | None] = os.getenv(
+#     "SSE_URL",
+#     None,
+# )
 
 
 def main() -> None:
-    """Start the client using asyncio."""
+    """Parse arguments and run the selected proxy mode."""
     parser = argparse.ArgumentParser(
         description=(
-            "Start the MCP proxy in one of two possible modes: as an SSE or stdio client."
+            "Start the MCP proxy to bridge between stdio and MQTT v5."
         ),
         epilog=(
             "Examples:\n"
-            "  mcp-proxy http://localhost:8080/sse\n"
-            "  mcp-proxy --headers Authorization 'Bearer YOUR_TOKEN' http://localhost:8080/sse\n"
-            "  mcp-proxy --port 8080 -- your-command --arg1 value1 --arg2 value2\n"
-            "  mcp-proxy your-command --port 8080 -e KEY VALUE -e ANOTHER_KEY ANOTHER_VALUE\n"
-            "  mcp-proxy your-command --port 8080 --allow-origin='*'\n"
+            # Mode 1: stdio -> MQTT
+            "  mcp-mqtt-proxy --broker-url mqtt://localhost:1883 --request-topic mcp/srv/req --response-topic mcp/cli/resp/{client_id} -- "
+            "                   your-mcp-stdio-cmd --cmd-arg\n\n"
+            # Mode 2: MQTT -> stdio (listen mode)
+            "  mcp-mqtt-proxy --listen --broker-url mqtts://user:pass@host:8883 --request-topic mcp/srv/req -- "
+            "                   your-mcp-stdio-cmd --cmd-arg\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
+
+    # Mode Selection
     parser.add_argument(
-        "command_or_url",
-        help=(
-            "Command or URL to connect to. When a URL, will run an SSE client, "
-            "otherwise will run the given command and connect as a stdio client. "
-            "See corresponding options for more details."
-        ),
-        nargs="?",  # Required below to allow for coming form env var
-        default=SSE_URL,
+        "--listen",
+        action="store_true",
+        help="Run in listen mode (MQTT -> stdio Server). If not set, runs in publish mode (stdio Client -> MQTT).",
     )
 
-    sse_client_group = parser.add_argument_group("SSE client options")
-    sse_client_group.add_argument(
-        "-H",
-        "--headers",
-        nargs=2,
-        action="append",
-        metavar=("KEY", "VALUE"),
-        help="Headers to pass to the SSE server. Can be used multiple times.",
-        default=[],
+    # Common MQTT Options
+    mqtt_group = parser.add_argument_group("MQTT Options")
+    mqtt_group.add_argument(
+        "--broker-url",
+        required=True,
+        help="URL of the MQTT broker (e.g., 'mqtt://host:port', 'mqtts://user:pass@host:port').",
+    )
+    mqtt_group.add_argument(
+        "--request-topic",
+        required=True,
+        help="MQTT topic for sending/receiving MCP requests.",
+    )
+    mqtt_group.add_argument(
+        "--response-topic",
+        help="MQTT topic pattern for receiving/sending MCP responses/notifications. "
+             "In publish mode (stdio->MQTT), this is subscribed to (use {client_id} placeholder). "
+             "In listen mode (MQTT->stdio), this is the base topic responses are published to.",
+        # Not strictly required immediately if using MQTT v5 request/response properties primarily,
+        # but useful for notifications or as fallback.
+        default=None,
+    )
+    mqtt_group.add_argument(
+        "--client-id",
+        default=f"mcp-mqtt-proxy-{uuid.uuid4()}",
+        help="MQTT client ID to use. Defaults to a random unique ID.",
+    )
+    mqtt_group.add_argument(
+        "--qos",
+        type=int,
+        choices=[0, 1, 2],
+        default=1,
+        help="MQTT Quality of Service level for publishing (default: 1).",
+    )
+    mqtt_group.add_argument(
+        "--username",
+        default=os.getenv("MQTT_USERNAME"),
+        help="MQTT username for authentication. Can also be set via MQTT_USERNAME env var.",
+    )
+    mqtt_group.add_argument(
+        "--password",
+        default=os.getenv("MQTT_PASSWORD"),
+        help="MQTT password for authentication. Can also be set via MQTT_PASSWORD env var.",
+    )
+    # Basic TLS support - aiomqtt handles parsing from URL or separate params
+    mqtt_group.add_argument(
+        "--tls-ca-certs",
+        default=None,
+        help="Path to CA certificate file for TLS.",
+    )
+    mqtt_group.add_argument(
+        "--tls-certfile",
+        default=None,
+        help="Path to client certificate file for TLS.",
+    )
+    mqtt_group.add_argument(
+        "--tls-keyfile",
+        default=None,
+        help="Path to client private key file for TLS.",
     )
 
-    stdio_client_options = parser.add_argument_group("stdio client options")
-    stdio_client_options.add_argument(
+    # Stdio Command Options (used in both modes)
+    stdio_group = parser.add_argument_group("Stdio Command Options")
+    stdio_group.add_argument(
+        "command",
+        help="The command to run the local MCP stdio server.",
+    )
+    stdio_group.add_argument(
         "args",
-        nargs="*",
-        help="Any extra arguments to the command to spawn the server",
+        nargs=argparse.REMAINDER, # Use REMAINDER to capture all following args for the command
+        help="Arguments to pass to the local MCP stdio server command.",
     )
-    stdio_client_options.add_argument(
+    stdio_group.add_argument(
         "-e",
         "--env",
         nargs=2,
         action="append",
         metavar=("KEY", "VALUE"),
-        help="Environment variables used when spawning the server. Can be used multiple times.",
+        help="Environment variables to set for the stdio server process. Can be used multiple times.",
         default=[],
     )
-    stdio_client_options.add_argument(
+    stdio_group.add_argument(
         "--cwd",
         default=None,
-        help="The working directory to use when spawning the process.",
+        help="Working directory for the stdio server process.",
     )
-    stdio_client_options.add_argument(
+    stdio_group.add_argument(
         "--pass-environment",
         action=argparse.BooleanOptionalAction,
-        help="Pass through all environment variables when spawning the server.",
+        help="Pass through all environment variables from the proxy to the stdio server process.",
         default=False,
     )
-    stdio_client_options.add_argument(
+
+    # General Options
+    parser.add_argument(
         "--debug",
         action=argparse.BooleanOptionalAction,
         help="Enable debug mode with detailed logging output.",
         default=False,
     )
 
-    mcp_server_group = parser.add_argument_group("SSE server options")
-    mcp_server_group.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to expose an SSE server on. Default is a random port",
-    )
-    mcp_server_group.add_argument(
-        "--host",
-        default=None,
-        help="Host to expose an SSE server on. Default is 127.0.0.1",
-    )
-    mcp_server_group.add_argument(
-        "--stateless",
-        action=argparse.BooleanOptionalAction,
-        help="Enable stateless mode for streamable http transports. Default is False",
-        default=False,
-    )
-    mcp_server_group.add_argument(
-        "--sse-port",
-        type=int,
-        default=0,
-        help="Port to expose an SSE server on. Default is a random port",
-    )
-    mcp_server_group.add_argument(
-        "--sse-host",
-        default="127.0.0.1",
-        help="Host to expose an SSE server on. Default is 127.0.0.1",
-    )
-    mcp_server_group.add_argument(
-        "--allow-origin",
-        nargs="+",
-        default=[],
-        help="Allowed origins for the SSE server. "
-        "Can be used multiple times. Default is no CORS allowed.",
-    )
+    # --- Argument parsing and processing ---
+    parsed_args = parser.parse_args()
 
-    args = parser.parse_args()
+    # Basic validation
+    if not parsed_args.command:
+        parser.error("The 'command' argument is required.")
 
-    if not args.command_or_url:
-        parser.print_help()
-        sys.exit(1)
-
+    # Setup logging
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=logging.DEBUG if parsed_args.debug else logging.INFO,
         format="[%(levelname)1.1s %(asctime)s.%(msecs).03d %(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger(__name__)
+    logger.debug("Parsed arguments: %s", parsed_args)
 
-    if (
-        SSE_URL
-        or args.command_or_url.startswith("http://")
-        or args.command_or_url.startswith("https://")
-    ):
-        # Start a client connected to the SSE server, and expose as a stdio server
-        logger.debug("Starting SSE client and stdio server")
-        headers = dict(args.headers)
-        if api_access_token := os.getenv("API_ACCESS_TOKEN", None):
-            headers["Authorization"] = f"Bearer {api_access_token}"
-        asyncio.run(run_sse_client(args.command_or_url, headers=headers))
-        return
-
-    # Start a client connected to the given command, and expose as an SSE server
-    logger.debug("Starting stdio client and SSE server")
-
-    # The environment variables passed to the server process
+    # Prepare stdio parameters
     env: dict[str, str] = {}
-    # Pass through current environment variables if configured
-    if args.pass_environment:
+    if parsed_args.pass_environment:
         env.update(os.environ)
-    # Pass in and override any environment variables with those passed on the command line
-    env.update(dict(args.env))
+    env.update(dict(parsed_args.env))
 
     stdio_params = StdioServerParameters(
-        command=args.command_or_url,
-        args=args.args,
+        command=parsed_args.command,
+        args=parsed_args.args,
         env=env,
-        cwd=args.cwd if args.cwd else None,
+        cwd=parsed_args.cwd if parsed_args.cwd else None,
     )
 
-    mcp_settings = MCPServerSettings(
-        bind_host=args.host if args.host is not None else args.sse_host,
-        port=args.port if args.port is not None else args.sse_port,
-        stateless=args.stateless,
-        allow_origins=args.allow_origin if len(args.allow_origin) > 0 else None,
-        log_level="DEBUG" if args.debug else "INFO",
-    )
-    asyncio.run(run_mcp_server(stdio_params, mcp_settings))
+    # --- Mode Dispatch (Placeholder Logic) ---
+    # This will be replaced with actual calls to run_mqtt_listener/run_mqtt_publisher
+    if parsed_args.listen:
+        logger.info("Starting in listen mode (MQTT -> stdio)")
+        logger.warning("Listen mode implementation pending.")
+        # Example future call:
+        # mqtt_settings = MQTTListenerSettings(...)
+        # asyncio.run(run_mqtt_listener(stdio_params, mqtt_settings))
+    else:
+        logger.info("Starting in publish mode (stdio -> MQTT)")
+        logger.warning("Publish mode implementation pending.")
+        # Example future call:
+        # mqtt_config = {...}
+        # asyncio.run(run_mqtt_publisher(stdio_params, mqtt_config))
+
+    logger.info("Proxy finished (or placeholder reached).")
 
 
 if __name__ == "__main__":

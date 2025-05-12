@@ -5,37 +5,37 @@ This document outlines the steps required to adapt the `mcp-proxy` (stdio <-> SS
 ## Phase 1: Project Setup & Dependency Management
 
 -   [x] Fork or copy the `mcp-proxy` repository.
--   [ ] Rename the project directory and relevant identifiers (e.g., package name in `pyproject.toml`).
--   [ ] Update `README.md` to reflect the new project name, purpose (MQTT focus), and link to `VISION.md`.
--   [ ] Update `pyproject.toml`:
-    -   [ ] Change `[project].name` to `mcp-mqtt-proxy`.
-    -   [ ] Update `[project].description`.
-    -   [ ] Update `[project].urls`.
-    -   [ ] Remove `uvicorn` from `dependencies`.
-    -   [ ] Remove `starlette` related dependencies if no longer needed (likely).
-    -   [ ] Add an async MQTT client library (e.g., `aiomqtt`) to `dependencies`.
-    -   [ ] Review and update `[project].scripts` if entry point names change.
+-   [x] Rename the project directory and relevant identifiers (e.g., package name in `pyproject.toml`).
+-   [x] Update `README.md` to reflect the new project name, purpose (MQTT focus), and link to `VISION.md`.
+-   [x] Update `pyproject.toml`:
+    -   [x] Change `[project].name` to `mcp-mqtt-proxy`.
+    -   [x] Update `[project].description`.
+    -   [x] Update `[project].urls`.
+    -   [x] Remove `uvicorn` from `dependencies`.
+    -   [x] Remove `starlette` related dependencies if no longer needed (likely).
+    -   [x] Add an async MQTT client library (e.g., `aiomqtt`) to `dependencies`.
+    -   [x] Review and update `[project].scripts` if entry point names change.
 -   [ ] Update `.gitignore` if necessary.
 -   [ ] Update `LICENSE` if needed (though MIT is likely fine).
 -   [ ] Update `Dockerfile` (remove uvicorn/starlette setup, add MQTT dependencies).
 
 ## Phase 2: Configuration & Entry Point (`__main__.py`)
 
--   [ ] Refactor `__main__.py` argument parsing (`argparse`):
-    -   [ ] Remove arguments related to SSE/HTTP (`--headers`, `--port`, `--host`, `--sse-port`, `--sse-host`, `--allow-origin`, `--stateless`).
-    -   [ ] Add arguments for MQTT configuration:
-        -   `--broker-url` (e.g., `mqtt://user:pass@host:port`)
-        -   `--request-topic` (Topic to publish requests to or listen on)
-        -   `--response-topic` (Topic to subscribe to for responses or publish responses to)
-        -   `--client-id` (Optional, defaults to auto-generated)
-        -   `--qos` (Optional, defaults to 0 or 1)
-        -   `--username` (Optional)
-        -   `--password` (Optional)
-        -   `--tls-ca-certs`, `--tls-certfile`, `--tls-keyfile` (Optional, for TLS)
-    -   [ ] Add an argument to distinguish modes, e.g., `--listen` for MQTT -> stdio mode.
--   [ ] Update the logic to determine the operating mode based on the new arguments (e.g., presence of `--listen` flag or the `command` argument).
--   [ ] Parse MQTT connection details from `--broker-url` and individual arguments.
--   [ ] Update calls to the core run functions (e.g., `run_mqtt_client` or `run_mqtt_server`) with the new MQTT parameters.
+-   [x] Refactor `__main__.py` argument parsing (`argparse`):
+    -   [x] Remove arguments related to SSE/HTTP (`--headers`, `--port`, `--host`, `--sse-port`, `--sse-host`, `--allow-origin`, `--stateless`).
+    -   [x] Add arguments for MQTT configuration:
+        -   [x] `--broker-url` (e.g., `mqtt://user:pass@host:port`)
+        -   [x] `--request-topic` (Topic to publish requests to or listen on)
+        -   [x] `--response-topic` (Topic to subscribe to for responses or publish responses to)
+        -   [x] `--client-id` (Optional, defaults to auto-generated)
+        -   [x] `--qos` (Optional, defaults to 0 or 1)
+        -   [x] `--username` (Optional)
+        -   [x] `--password` (Optional)
+        -   [x] `--tls-ca-certs`, `--tls-certfile`, `--tls-keyfile` (Optional, for TLS)
+    -   [x] Add an argument to distinguish modes, e.g., `--listen` for MQTT -> stdio mode.
+-   [x] Update the logic to determine the operating mode based on the new arguments (placeholder added).
+-   [x] Parse MQTT connection details from `--broker-url` and individual arguments (partially done, more in implementation phases).
+-   [x] Update calls to the core run functions (placeholder added).
 
 ## Phase 3: Mode 1 Implementation (stdio Client -> MQTT)
 
@@ -44,12 +44,12 @@ This document outlines the steps required to adapt the `mcp-proxy` (stdio <-> SS
     -   [ ] Remove `sse_client` usage.
     -   [ ] Add `aiomqtt` client connection logic using parsed configuration.
     -   [ ] Implement logic to bridge `stdio_server` streams and `ClientSession` with MQTT:
-        -   Subscribe to the specified `response_topic` using `aiomqtt`.
-        -   Create an `asyncio.Queue` or pipe to feed messages from the MQTT subscription into the `read_stream` expected by `ClientSession`.
-        -   Create a mechanism where data written to the `write_stream` by `ClientSession` is published to the `request_topic` via `aiomqtt`.
-        -   Instantiate `ClientSession` with these adapted MQTT-backed streams.
-        -   Call `create_proxy_server` (from `proxy_server.py`) with the `ClientSession`.
-        -   Run the proxy server using `stdio_server()` streams.
+        -   [ ] Subscribe to the specified `response_topic` using `aiomqtt`.
+        -   [ ] Create an `asyncio.Queue` or pipe to feed messages from the MQTT subscription into the `read_stream` expected by `ClientSession`.
+        -   [ ] Create a mechanism where data written to the `write_stream` by `ClientSession` is published to the `request_topic` via `aiomqtt`.
+        -   [ ] Instantiate `ClientSession` with these adapted MQTT-backed streams.
+        -   [ ] Call `create_proxy_server` (from `proxy_server.py`) with the `ClientSession`.
+        -   [ ] Run the proxy server using `stdio_server()` streams.
     -   [ ] Ensure proper handling of MQTT connection/disconnection and errors.
     -   [ ] Handle MCP message serialization (to JSON) before publishing and deserialization after receiving.
 
@@ -64,37 +64,37 @@ This document outlines the steps required to adapt the `mcp-proxy` (stdio <-> SS
     -   [ ] Call `create_proxy_server` with the `ClientSession` to get the `mcp_server` instance.
     -   [ ] Subscribe to the `request_topic` using `aiomqtt`.
     -   [ ] Implement the MQTT message handler callback:
-        -   Deserialize incoming MQTT payload into an MCP request object.
-        -   **Crucially:** Determine how to invoke the correct handler on the `mcp_server` instance based on the request type. (The `mcp.Server` class might need inspection or a dedicated dispatch method).
-        -   Await the handler execution to get the MCP response.
-        -   Serialize the response.
-        -   Publish the response to the `response_topic` (potentially adding client ID or correlation ID if needed).
+        -   [ ] Deserialize incoming MQTT payload into an MCP request object.
+        -   [ ] **Crucially:** Determine how to invoke the correct handler on the `mcp_server` instance based on the request type. (The `mcp.Server` class might need inspection or a dedicated dispatch method).
+        -   [ ] Await the handler execution to get the MCP response.
+        -   [ ] Serialize the response.
+        -   [ ] Publish the response to the `response_topic` (potentially adding client ID or correlation ID if needed).
     -   [ ] Handle notifications generated by the stdio process and publish them.
     -   [ ] Ensure proper handling of MQTT connection/disconnection and errors.
 
 ## Phase 5: Core Proxy Logic (`proxy_server.py`)
 
 -   [ ] Review `create_proxy_server` function.
-    -   Verify if it requires any changes due to the transport layer modification. (Likely minimal changes, as it depends on the `ClientSession` abstraction).
-    -   Ensure MCP message serialization/deserialization is handled correctly at the boundaries (MQTT client/server modules).
+    -   [ ] Verify if it requires any changes due to the transport layer modification. (Likely minimal changes, as it depends on the `ClientSession` abstraction).
+    -   [ ] Ensure MCP message serialization/deserialization is handled correctly at the boundaries (MQTT client/server modules).
 
 ## Phase 6: Testing
 
 -   [ ] Set up an MQTT broker (e.g., Mosquitto via Docker) for integration testing.
 -   [ ] Adapt existing tests in `tests/` or write new ones:
-    -   Test Mode 1: Mock stdio, verify MQTT publications, mock MQTT responses, verify stdio output.
-    -   Test Mode 2: Mock MQTT requests, verify stdio interactions, mock stdio responses, verify MQTT publications.
-    -   Test connection handling, authentication, different QoS levels.
-    -   Test error scenarios (broker disconnect, malformed messages).
+    -   [ ] Test Mode 1: Mock stdio, verify MQTT publications, mock MQTT responses, verify stdio output.
+    -   [ ] Test Mode 2: Mock MQTT requests, verify stdio interactions, mock stdio responses, verify MQTT publications.
+    -   [ ] Test connection handling, authentication, different QoS levels.
+    -   [ ] Test error scenarios (broker disconnect, malformed messages).
 -   [ ] Update `codecov.yml` if needed.
 
 ## Phase 7: Documentation & Finalization
 
 -   [ ] Thoroughly update `README.md` with:
-    -   Installation instructions.
-    -   Detailed configuration options (MQTT specific).
-    -   Usage examples for both modes.
-    -   Troubleshooting tips.
+    -   [ ] Installation instructions.
+    -   [ ] Detailed configuration options (MQTT specific).
+    -   [ ] Usage examples for both modes.
+    -   [ ] Troubleshooting tips.
 -   [ ] Update `Dockerfile` with final build steps and entry point.
 -   [ ] Ensure pre-commit hooks (`ruff`, `mypy`) pass.
 -   [ ] Create release notes/changelog.

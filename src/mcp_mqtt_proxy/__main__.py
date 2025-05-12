@@ -8,6 +8,8 @@ import logging
 import os
 import sys
 import uuid
+import platform
+import contextlib
 from pathlib import Path
 from typing import Any, Dict, Generic, List, Optional, Type, TypeVar
 
@@ -15,6 +17,7 @@ from mcp_mqtt_proxy.config import MQTTListenerConfig, MQTTPublisherConfig
 from mcp_mqtt_proxy.mqtt_listener import run_mqtt_listener
 from mcp_mqtt_proxy.mqtt_publisher import run_mqtt_publisher
 from mcp_mqtt_proxy.utils import generate_id
+from mcp.client.stdio import StdioServerParameters
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +64,14 @@ def parse_config[T](config_cls: type[T], arg_source: argparse.Namespace) -> T:
         for key, value in arg_source.env:
             env[key] = value
             
-        # Create the stdio process configuration
-        config_dict["stdio_mcp_process"] = {
-            "command": arg_source.command,
-            "args": arg_source.args,
-            "env": env,
-            "cwd": arg_source.cwd,
-        }
+        # Create the stdio process configuration as a StdioServerParameters object
+        # instead of a dict to match the MQTTListenerConfig type expectation
+        config_dict["stdio_mcp_process"] = StdioServerParameters(
+            command=arg_source.command,
+            args=arg_source.args,
+            env=env,
+            cwd=arg_source.cwd,
+        )
         config_dict["mcp_timeout"] = arg_source.mcp_timeout
         
     elif config_cls == MQTTPublisherConfig:
@@ -102,7 +106,7 @@ def create_parser() -> argparse.ArgumentParser:
     parent_parser.add_argument(
         "--client-id",
         default=f"mcp-mqtt-proxy-{generate_id()}",
-        help="MQTT client ID to use. Defaults to a random unique ID.",
+        help="Client ID for MQTT connection (default: auto-generated).",
     )
     parent_parser.add_argument(
         "--qos",

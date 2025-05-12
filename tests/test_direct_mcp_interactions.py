@@ -1,17 +1,12 @@
-"""Tests for the mcp-proxy module.
+"""Tests for direct mcp.server.Server interactions.
 
-Tests are running in two modes:
-- One where the server is exercised directly though an in memory client, just to
-  set a baseline for the expected behavior.
-- Another where the server is exercised through a proxy server, which forwards
-  the requests to the original server.
-
-The same test code is run on both to ensure parity.
+These tests exercise an mcp.server.Server instance directly through an 
+in-memory client connection to establish a baseline for expected MCP behavior.
 """
 
 import typing as t
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,8 +17,6 @@ from mcp.shared.exceptions import McpError
 from mcp.shared.memory import create_connected_server_and_client_session
 from pydantic import AnyUrl
 
-from mcp_proxy.proxy_server import create_proxy_server
-
 TOOL_INPUT_SCHEMA = {"type": "object", "properties": {"input1": {"type": "string"}}}
 
 SessionContextManager = Callable[[Server[object]], AbstractAsyncContextManager[ClientSession]]
@@ -32,21 +25,13 @@ SessionContextManager = Callable[[Server[object]], AbstractAsyncContextManager[C
 in_memory: SessionContextManager = create_connected_server_and_client_session
 
 
-@asynccontextmanager
-async def proxy(server: Server[object]) -> AsyncGenerator[ClientSession, None]:
-    """Create a connection to the server through the proxy server."""
-    async with in_memory(server) as session:
-        wrapped_server = await create_proxy_server(session)
-        async with in_memory(wrapped_server) as wrapped_session:
-            yield wrapped_session
-
-
-@pytest.fixture(params=["server", "proxy"])
+@pytest.fixture(params=["server"])
 def session_generator(request: pytest.FixtureRequest) -> SessionContextManager:
-    """Fixture that returns a client creation strategy either direct or using the proxy."""
+    """Fixture that returns a client creation strategy (direct in-memory)."""
     if request.param == "server":
         return in_memory
-    return proxy
+    pytest.fail(f"Unsupported session_generator param: {request.param}")
+    return in_memory
 
 
 @pytest.fixture

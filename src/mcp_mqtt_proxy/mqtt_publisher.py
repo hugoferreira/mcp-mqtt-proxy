@@ -3,35 +3,87 @@
 import asyncio
 import json
 import logging
+import math
 import ssl
+import subprocess # Needed for starting process
+import sys # Added import for sys.stdin/sys.stdout
 import typing as t
 from dataclasses import dataclass
 from urllib.parse import urlparse
+import uuid
+from typing import AsyncGenerator, Optional
 
 import aiomqtt
-from mcp import client, server, types
-from mcp.client.stdio import StdioServerParameters
-from mcp.server.stdio import stdio_server
+import anyio
+import paho.mqtt.client as paho_mqtt_client
+import paho.mqtt.properties as paho_mqtt_properties
+import paho.mqtt.packettypes as paho_mqtt_packettypes
+from mcp import McpError
+from mcp.client.session import ClientSession # Needed for instantiation
+# Removed: from mcp.client.stdio import connect_subprocess
+import pydantic
+from pydantic import ValidationError
 
-from .proxy_server import create_proxy_server
+# Import specific types needed
+from mcp.types import (
+    Notification,
+    CallToolResult,
+    TextContent,
+    JSONRPCMessage,
+    JSONRPCRequest,
+)
+
+from mcp_mqtt_proxy.config import MQTTPublisherConfig, create_mqtt_client_from_config
+# Import the bridge utility
+from .utils import bridge_stdio_to_anyio_session
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class MQTTPublisherConfig:
-    """Configuration for the MQTT Publisher mode."""
+# Helper to parse incoming MQTT messages
+def _parse_mcp_message_from_json(payload: bytes) -> CallToolResult | Notification | None:
+    """Attempts to parse bytes (assumed JSON) into an MCP CallToolResult or Notification."""
+    try:
+        json_str = payload.decode('utf-8')
+        data = json.loads(json_str)
+        message_id = data.get('id') # Relevant for responses
 
-    broker_url: str
-    request_topic: str
-    response_topic: str  # Topic to subscribe to for responses
-    client_id: str
-    qos: int
-    username: str | None = None
-    password: str | None = None
-    tls_ca_certs: str | None = None
-    tls_certfile: str | None = None
-    tls_keyfile: str | None = None
+        # Heuristic to determine message type based on common MCP fields
+        if 'id' in data:
+            logger.debug(f"Attempting to parse as CallToolResult (ID: {message_id})")
+            try:
+                result = CallToolResult.model_validate(data)
+                if result.isError:
+                     logger.warning(f"Parsed CallToolResult indicates an error (ID: {message_id}): {result.content}")
+                else:
+                     logger.debug(f"Successfully parsed CallToolResult (ID: {message_id})")
+                return result
+            except ValidationError as e:
+                 logger.warning(f"Failed to validate payload as CallToolResult (ID: {message_id}): {e}")
+                 logger.debug(f"Payload data: {data}")
+                 return None
+
+        elif 'method' in data:
+            logger.debug(f"Attempting to parse as Notification (Method: {data.get('method')})")
+            try:
+                notification = Notification.model_validate(data)
+                logger.debug(f"Successfully parsed Notification (Method: {notification.method})")
+                return notification
+            except ValidationError as e:
+                 logger.warning(f"Failed to validate payload as Notification (Method: {data.get('method')}): {e}")
+                 logger.debug(f"Payload data: {data}")
+                 return None
+        else:
+            logger.warning(f"Received message with unrecognized structure via MQTT (ID: {message_id}, Keys: {list(data.keys())}): {data if len(str(data)) < 200 else str(data)[:200] + '...'}")
+            return None
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning(f"Failed to decode MQTT payload as JSON: {e}")
+        logger.debug(f"Payload bytes: {payload!r}")
+        return None
+    except Exception:
+        logger.exception("Unexpected error parsing MCP message from JSON")
+        return None
 
 
 # TODO: Implement proper stream bridging between MQTT (via Queue) and ClientSession
@@ -49,190 +101,199 @@ async def mqtt_write_stream(data: bytes) -> None:
     await asyncio.sleep(0) # Prevent blocking for now
 
 
-async def run_mqtt_publisher(
-    stdio_params: StdioServerParameters, config: MQTTPublisherConfig
-) -> None:
-    """Run the proxy in stdio Client -> MQTT Publisher mode."""
-    logger.info(
-        "Starting MQTT Publisher mode: stdio command '%s' -> MQTT broker '%s'",
-        stdio_params.command,
-        config.broker_url,
-    )
+async def run_mqtt_publisher(config: MQTTPublisherConfig):
+    """
+    Main execution function for the MQTT publisher mode.
+    Connects to MQTT, reads MCP messages from its own stdin, publishes them,
+    listens for responses on MQTT, and writes responses back to its own stdout.
+    
+    If config.debug_timeout is set, the publisher will automatically exit after that many seconds,
+    which is useful for testing.
+    """
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
 
-    # --- Parse Broker URL and configure TLS ---
+    # Setup debug timeout if specified
+    debug_timeout_task = None
+    if config.debug_timeout is not None and config.debug_timeout > 0:
+        logger.info(f"Debug timeout set: will exit after {config.debug_timeout} seconds")
+        
+        async def trigger_timeout_shutdown():
+            await asyncio.sleep(config.debug_timeout)
+            logger.info(f"Debug timeout of {config.debug_timeout} seconds reached, shutting down")
+            shutdown_event.set()
+            
+        debug_timeout_task = asyncio.create_task(trigger_timeout_shutdown(), name="debug-timeout")
+    
+    # --- Get Asyncio Streams for Own Stdin/Stdout ---
     try:
-        parsed_url = urlparse(config.broker_url)
-        hostname = parsed_url.hostname
-        port = parsed_url.port or (8883 if parsed_url.scheme == "mqtts" else 1883)
-        username = config.username or parsed_url.username
-        password = config.password or parsed_url.password
-        transport: t.Literal["tcp", "websockets"] = "tcp" # Default, websockets NYI
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-        tls_params = None
-        if parsed_url.scheme == "mqtts":
-            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            tls_context.load_verify_locations(cafile=config.tls_ca_certs)
-            if config.tls_certfile and config.tls_keyfile:
-                tls_context.load_cert_chain(
-                    config.tls_certfile, keyfile=config.tls_keyfile
-                )
-            elif config.tls_certfile:
-                tls_context.load_cert_chain(config.tls_certfile)
-            # Create aiomqtt.TLSParameters if needed
-            tls_params = aiomqtt.TLSParameters(
-                ca_certs=config.tls_ca_certs,
-                certfile=config.tls_certfile,
-                keyfile=config.tls_keyfile,
-                cert_reqs=ssl.CERT_REQUIRED,
-                tls_version=ssl.PROTOCOL_TLS_CLIENT, # Adjust if needed
-                ciphers=None,
-            )
-
+        writer_transport, writer_protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, sys.stdout)
+        writer = asyncio.StreamWriter(writer_transport, writer_protocol, reader, loop)
+        logger.info("Successfully opened asyncio streams for stdin/stdout.")
     except Exception as e:
-        logger.exception("Failed to parse Broker URL or configure TLS: %s", e)
+        logger.exception(f"Failed to open stdin/stdout streams: {e}")
         return
 
-    if not hostname:
-         logger.error("Could not extract hostname from broker URL: %s", config.broker_url)
-         return
-
-
-    # --- Main Execution ---
-    # Queue for messages coming *from* MQTT (responses) to be read by ClientSession
-    incoming_message_queue: asyncio.Queue[types.Message] = asyncio.Queue()
-    mqtt_listener_task = None
-
+    # --- Connect to MQTT Broker using async with --- 
     try:
-        async with aiomqtt.Client(
-            hostname=hostname,
-            port=port,
-            username=username,
-            password=password,
-            client_id=config.client_id,
-            transport=transport,
-            tls_params=tls_params,
-            # Using MQTTv5
-            protocol=aiomqtt.ProtocolVersion.V5,
-        ) as client:
-            logger.info("Connected to MQTT Broker: %s", config.broker_url)
+        async with create_mqtt_client_from_config(config) as mqtt_client:
+            logger.info(f"Connected to MQTT broker at {config.broker_url}")
 
-            # --- Define MQTT -> Queue Task ---
-            async def mqtt_message_handler():
-                logger.info("Subscribing to response topic: %s", config.response_topic)
-                await client.subscribe(config.response_topic, qos=config.qos)
-                try:
-                    async for message in client.messages:
-                        logger.debug(
-                            "Received MQTT message on topic '%s'", message.topic
-                        )
-                        try:
-                            payload_str = message.payload.decode("utf-8")
-                            mcp_message_dict = json.loads(payload_str)
-                            # TODO: Validate and properly parse mcp_message_dict into MCP type
-                            # For now, assume it's a valid dict representing an MCP message
-                            # This needs robust parsing based on message type (jsonrpc, method)
-                            logger.debug("MQTT Payload Dict: %s", mcp_message_dict)
-                            # Need to convert dict back to an actual MCP Message object instance
-                            # This part requires knowing the message structure (Response, Notification)
-                            # Example placeholder:
-                            mcp_message = types.parse_message(mcp_message_dict) # mcp lib helper
-                            await incoming_message_queue.put(mcp_message)
+            # --- Prepare MQTT Response Handling (inside async with) ---
+            response_topic_to_subscribe = f"{config.base_topic}/response/{config.client_id}"
+            logger.info(f"Subscribing to publisher response topic: {response_topic_to_subscribe}")
+            await mqtt_client.subscribe(response_topic_to_subscribe, qos=config.qos)
 
-                        except json.JSONDecodeError:
-                            logger.error(
-                                "Failed to decode JSON from MQTT message: %s", message.payload
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                "Error processing received MQTT message: %s", e
-                            )
-                except aiomqtt.MqttError as e:
-                     logger.error("MQTT Listener Error: %s. Stopping listener.", e)
+            incoming_message_queue: asyncio.Queue[CallToolResult | Notification] = asyncio.Queue()
+
+            async def mqtt_message_handler() -> None:
+                # Handles incoming MQTT messages (responses)
+                try: 
+                    async with mqtt_client.messages() as messages:
+                        async for message in messages:
+                            logger.debug(f"MQTT Handler: Received message on '{message.topic}'")
+                            try:
+                                mcp_message = _parse_mcp_message_from_json(message.payload)
+                                if mcp_message:
+                                    await incoming_message_queue.put(mcp_message)
+                                else:
+                                    logger.warning("MQTT Handler: Failed to parse MCP message from MQTT")
+                            except Exception:
+                                logger.exception("MQTT Handler: Error processing individual message")
                 except asyncio.CancelledError:
-                    logger.info("MQTT listener task cancelled.")
+                     logger.info("MQTT message handler cancelled.")
+                     # Do not re-raise cancellation here, let main loop handle shutdown
+                except Exception:
+                     logger.exception("MQTT Handler: Unhandled error in message loop")
+                     shutdown_event.set() # Signal shutdown on unexpected error
                 finally:
-                    logger.info("MQTT listener task finished.")
+                     logger.info("MQTT Handler: Exiting.")
 
-            # Start the task to listen for MQTT messages
-            mqtt_listener_task = asyncio.create_task(mqtt_message_handler())
+            handler_task = asyncio.create_task(mqtt_message_handler(), name="mqtt-handler")
 
-            # --- Define Bridged Streams for ClientSession ---
-            async def session_read_stream() -> bytes:
-                """Reads next message from MQTT via the internal queue."""
-                logger.debug("Waiting for message from incoming MQTT queue...")
-                mcp_message = await incoming_message_queue.get()
-                logger.debug("Got message from queue: %s", mcp_message)
-                # Serialize MCP message object back to JSON bytes for ClientSession
+            # --- MQTT Publishing Function (needs access to mqtt_client) ---
+            async def publish_request_to_mqtt(message: JSONRPCRequest) -> None:
+                # Publishes outgoing requests to MQTT
+                request_topic_to_publish = f"{config.base_topic}/request"
+                logger.debug(f"Publishing: {message.method} (ID: {message.id}) to '{request_topic_to_publish}'")
                 try:
-                    # Assuming mcp library can dump models correctly
-                    json_str = mcp_message.model_dump_json()
-                    return json_str.encode("utf-8")
+                    payload = message.model_dump_json().encode('utf-8')
                 except Exception as e:
-                    logger.exception("Failed to serialize MCP message for ClientSession: %s", e)
-                    # What to return on error? Empty bytes might break session.
-                    # Maybe raise, or return a specific error indicator if possible?
-                    return b'{}' # Problematic?
+                    logger.exception(f"Publishing: Failed to serialize MCP message: {e}")
+                    return
 
-
-            async def session_write_stream(data: bytes) -> None:
-                """Publishes message data from ClientSession to the MQTT request topic."""
-                logger.debug("Received data from ClientSession to publish via MQTT")
+                fixed_response_topic = f"{config.base_topic}/response/{config.client_id}"
+                properties = paho_mqtt_properties.Properties(paho_mqtt_packettypes.PacketTypes.PUBLISH)
+                properties.MessageExpiryInterval = config.message_expiry_interval or 0
+                properties.ResponseTopic = fixed_response_topic
+                properties.CorrelationData = str(message.id).encode('utf-8')
                 try:
-                    payload_str = data.decode("utf-8")
-                    # Optional: Deserialize to MCP object for validation/logging?
-                    # mcp_request = types.parse_message(json.loads(payload_str))
-                    # logger.debug("Publishing MCP Request: %s", mcp_request.method)
-
-                    # Prepare MQTT v5 properties
-                    properties = aiomqtt.Properties(
-                        topic_alias=None, # Add other relevant properties if needed
-                        response_topic=config.response_topic,
-                        # correlation_data=mcp_request.id.encode('utf-8') # Assuming request has an ID
-                    )
-
-                    await client.publish(
-                        config.request_topic,
-                        payload=data, # Send original bytes
-                        qos=config.qos,
-                        properties=properties,
-                    )
-                    logger.debug("Published message to topic '%s'", config.request_topic)
+                    await mqtt_client.publish(request_topic_to_publish, payload, qos=config.qos, properties=properties)
                 except Exception as e:
-                    logger.exception("Failed to publish message via MQTT: %s", e)
-                    # How to signal error back to ClientSession? May need specific handling.
+                    logger.exception(f"Publishing: Failed to publish MQTT request: {e}")
+                    # Consider signaling shutdown if publishing fails critically
 
+            # --- Bridge Tasks (using asyncio streams) --- 
+            async def bridge_stdin_to_mqtt() -> None:
+                """Task to read requests from stdin and publish to MQTT."""
+                logger.info("STDIN->MQTT Bridge: Starting to listen for messages from stdin...")
+                try:
+                    while True:
+                        # Read line-by-line from the asyncio StreamReader
+                        line_bytes = await reader.readline()
+                        if not line_bytes: 
+                            logger.info("STDIN->MQTT Bridge: Stdin closed (EOF).")
+                            break # End of stream
+                        try:
+                             json_str = line_bytes.decode('utf-8').strip()
+                             if not json_str: continue # Skip empty lines
+                             mcp_request = JSONRPCRequest.model_validate_json(json_str)
+                             logger.info(f"STDIN->MQTT Bridge: Relaying message from stdin: Method {mcp_request.method}, ID {mcp_request.id}")
+                             await publish_request_to_mqtt(mcp_request)
+                        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as parse_err:
+                             logger.warning(f"STDIN->MQTT Bridge: Failed to parse line from stdin: {parse_err}. Line: {line_bytes!r}")
+                        except Exception as e:
+                             logger.exception(f"STDIN->MQTT Bridge: Error processing line from stdin: {e}")
+                except asyncio.CancelledError:
+                     logger.info("STDIN->MQTT bridge cancelled.")
+                except Exception:
+                    logger.exception("Error in STDIN->MQTT bridge task")
+                    shutdown_event.set() # Signal shutdown
+                finally:
+                    logger.info("STDIN->MQTT Bridge: Exiting.")
+                    shutdown_event.set() # Ensure shutdown if this task exits
 
-            # --- Run the MCP Client Session ---
-            logger.info("Creating MCP ClientSession with MQTT-bridged streams...")
-            async with client.ClientSession(
-                session_read_stream, session_write_stream
-            ) as session:
-                # Create the proxy server instance using the remote session's capabilities
-                app: server.Server[object] = await create_proxy_server(session)
-                logger.info(
-                    "Proxy server configured based on remote capabilities. Starting stdio server..."
-                )
+            async def bridge_mqtt_to_stdout() -> None:
+                """Task to read responses from MQTT queue and send to stdout."""
+                logger.info("MQTT->STDOUT Bridge: Starting to listen for messages from MQTT queue...")
+                try:
+                    while True:
+                        message_from_queue = await incoming_message_queue.get()
+                        msg_type = type(message_from_queue).__name__
+                        msg_id = getattr(message_from_queue, 'id', None)
+                        id_str = f" (ID: {msg_id})" if msg_id else ""
+                        logger.info(f"MQTT->STDOUT Bridge: Relaying {msg_type}{id_str} to stdout")
+                        try:
+                            # Serialize message and write to asyncio StreamWriter
+                            json_payload = message_from_queue.model_dump_json()
+                            writer.write((json_payload + '\n').encode('utf-8'))
+                            await writer.drain()
+                        except (ValidationError, TypeError) as serialize_err:
+                            logger.error(f"MQTT->STDOUT Bridge: Failed to serialize message for stdout: {serialize_err}")
+                        except ConnectionError as e:
+                            logger.error(f"MQTT->STDOUT Bridge: Connection error writing to stdout: {e}")
+                            break # Stop if stdout is closed
+                        except Exception:
+                             logger.exception("MQTT->STDOUT Bridge: Unexpected error sending to stdout")
+                        finally:
+                             incoming_message_queue.task_done()
+                except asyncio.CancelledError:
+                    logger.info("MQTT->STDOUT bridge cancelled.")
+                except Exception:
+                    logger.exception("Error in MQTT->STDOUT bridge task")
+                    shutdown_event.set()
+                finally:
+                    logger.info("MQTT->STDOUT Bridge: Exiting.")
+                    shutdown_event.set() # Ensure shutdown if this task exits
 
-                # Run the actual stdio server, bridging it to the proxy app
-                # The proxy app internally uses the MQTT-bridged ClientSession
-                async with stdio_server() as (stdio_read, stdio_write):
-                    logger.info("Running proxy app against stdio streams.")
-                    await app.run(
-                        stdio_read,
-                        stdio_write,
-                        app.create_initialization_options(),
-                    )
-                    logger.info("Proxy app run finished.")
+            # --- Start Tasks and Wait (inside async with mqtt_client) --- 
+            stdin_to_mqtt_task = asyncio.create_task(bridge_stdin_to_mqtt(), name="stdin-to-mqtt")
+            mqtt_to_stdout_task = asyncio.create_task(bridge_mqtt_to_stdout(), name="mqtt-to-stdout")
+            
+            # Monitor tasks and shutdown event
+            tasks_to_monitor = {handler_task, stdin_to_mqtt_task, mqtt_to_stdout_task}
+            await shutdown_event.wait() # Wait until a task signals shutdown or an error occurs
 
-    except aiomqtt.MqttError as error:
-        logger.error(f"MQTT connection error: {error}")
+            logger.info("Shutdown signalled. Cancelling tasks...")
+            
     except asyncio.CancelledError:
-         logger.info("Main publisher task cancelled.")
+        logger.info("Publisher run task cancelled.")
     except Exception as e:
-        logger.exception("An unexpected error occurred in run_mqtt_publisher: %s", e)
+        logger.exception(f"Publisher encountered critical error: {e}")
     finally:
-        if mqtt_listener_task and not mqtt_listener_task.done():
-            logger.info("Cancelling MQTT listener task...")
-            mqtt_listener_task.cancel()
-            await asyncio.wait([mqtt_listener_task], timeout=2) # Wait briefly for cleanup
-        logger.info("MQTT Publisher mode finished.")
+        logger.info("Shutting down MQTT publisher...")
+        # Cancel debug timeout task if it exists
+        if debug_timeout_task and not debug_timeout_task.done():
+            debug_timeout_task.cancel()
+            try:
+                await debug_timeout_task
+            except asyncio.CancelledError:
+                pass
+                
+        # Cancel all running tasks gracefully
+        all_tasks = [handler_task, stdin_to_mqtt_task, mqtt_to_stdout_task]
+        for task in all_tasks:
+            if task and not task.done():
+                try:
+                    task.cancel()
+                except Exception as e:
+                     logger.warning(f"Error cancelling task {task.get_name()}: {e}")
+        # Wait for tasks to finish cancelling
+        await asyncio.gather(*[t for t in all_tasks if t and not t.done()], return_exceptions=True)
+        
+        # MQTT client disconnect happens implicitly via async with
+        logger.info("MQTT publisher shut down.")

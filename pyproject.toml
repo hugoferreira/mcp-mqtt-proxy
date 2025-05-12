@@ -30,8 +30,11 @@ classifiers = [
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.8.0,<2.0.0",
-    "aiomqtt>=2.0.0,<3.0.0",
+    "mcp>=0.9.1,<2.0",
+    "aiomqtt>=1.0,<2.0",
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "anyio>=4.0,<5.0",
 ]
 
 [build-system]

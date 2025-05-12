@@ -122,6 +122,16 @@ Tests are located in the `tests/` directory and can be run using `pytest` (requi
 pytest
 ```
 
+### Test Fixtures
+
+The project uses standalone Python scripts for test fixtures rather than embedding code as strings within test files. This makes fixtures:
+
+- Easier to edit (proper syntax highlighting and linting)
+- More maintainable (no need for string escaping)
+- Reusable across multiple test files
+
+Fixtures can be found in the `tests/integration/fixtures/` directory, with `simple_responder.py` serving as a mock MCP server for integration tests.
+
 ## Acknowledgements
 
 This project is derived from the original [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy) by Sergey Parfenyuk, which provides the foundation for stdio/MCP handling and the overall proxy structure.

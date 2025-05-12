@@ -1,3 +1,5 @@
+**WARNING:** This fork is not working! Go to the original!
+
 # mcp-proxy
 
 ![GitHub License](https://img.shields.io/github/license/sparfenyuk/mcp-proxy)

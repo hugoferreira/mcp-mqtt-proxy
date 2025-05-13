@@ -212,7 +212,7 @@ async def test_listener_receives_request_and_sends_response(mqtt_publisher_clien
         logger.info("Starting MQTT traffic monitor")
         try:
             # Subscribe to all topics
-    await mqtt_publisher_client.subscribe("#", qos=DEFAULT_QOS)
+            await mqtt_publisher_client.subscribe("#", qos=DEFAULT_QOS)
             logger.info("Monitor subscribed to all topics (#)")
             
             async with mqtt_publisher_client.messages() as messages:
@@ -310,14 +310,14 @@ async def test_listener_receives_request_and_sends_response(mqtt_publisher_clien
                         logger.info(f"[RESPONSE] Found message on response topic: {payload}")
                         try:
                             response_data = json.loads(payload)
-                        response = JSONRPCResponse.model_validate(response_data)
-                        return response
-                    except (json.JSONDecodeError, ValidationError) as e:
+                            response = JSONRPCResponse.model_validate(response_data)
+                            return response
+                        except (json.JSONDecodeError, ValidationError) as e:
                             logger.error(f"[RESPONSE] Failed to parse response: {e}")
             except asyncio.TimeoutError:
                 # No message in this interval, continue waiting
                 logger.debug("No new messages in this interval")
-                        continue
+                continue
         
         # After timeout
         logger.warning(f"No valid response received on {response_topic} after {response_timeout}s")
@@ -794,13 +794,13 @@ async def test_direct_listener_run():
             await asyncio.sleep(1.0)
             
             # Create test request
-        test_request_id = str(uuid.uuid4())
-        test_request = JSONRPCRequest(
-            jsonrpc="2.0",
-            id=test_request_id,
-            method="test/echo",
-            params={"message": "Hello from direct test"}
-        )
+            test_request_id = str(uuid.uuid4())
+            test_request = JSONRPCRequest(
+                jsonrpc="2.0",
+                id=test_request_id,
+                method="test/echo",
+                params={"message": "Hello from direct test"}
+            )
         
             # Set up properties
             properties = paho_mqtt_properties.Properties(paho_mqtt_properties.PacketTypes.PUBLISH)
@@ -844,7 +844,7 @@ async def test_direct_listener_run():
                 pass
             
             # Cancel watcher task
-            if 'watcher_task' in locals():
+            if 'watcher_task' in locals() and watcher_task and not watcher_task.done():
                 watcher_task.cancel()
                 try:
                     await watcher_task
@@ -870,7 +870,7 @@ async def test_direct_listener_minimal_test():
         async def start(self):
             self.client = aiomqtt.Client(
                 hostname="localhost",
-                port=1883,
+                port=1883, # Corrected port to be int
                 client_id=f"echo-responder-{uuid.uuid4()}",
                 protocol=aiomqtt.ProtocolVersion.V5
             )
@@ -952,6 +952,7 @@ async def test_direct_listener_minimal_test():
     responder = EchoResponder()
     responder_task = asyncio.create_task(responder.start())
     
+    # Main try block for the test
     try:
         # Wait for responder to initialize
         await asyncio.sleep(1.0)
@@ -959,7 +960,7 @@ async def test_direct_listener_minimal_test():
         # Create test client
         async with aiomqtt.Client(
             hostname="localhost",
-            port=1883,
+            port=1883, # Corrected port to be int
             client_id=f"test-client-{uuid.uuid4()}",
             protocol=aiomqtt.ProtocolVersion.V5
         ) as client:
@@ -967,32 +968,30 @@ async def test_direct_listener_minimal_test():
             await client.subscribe(response_topic, qos=1)
             logger.info(f"Test client subscribed to {response_topic}")
             
-            # Set up response event
-        response_received = asyncio.Event()
-        received_response = None
+            response_received = asyncio.Event()
+            received_response = None
         
-        # Listen for responses
-        async def listen_for_response():
-            nonlocal received_response
-            try:
+            async def listen_for_response():
+                nonlocal received_response
+                try:
                     async with client.messages() as messages:
-                    async for message in messages:
+                        async for message in messages:
                             logger.info(f"Test client received message on {message.topic}")
-                        
-                        if message.topic.matches(response_topic):
-                            try:
+                            if message.topic.matches(response_topic):
+                                try:
                                     payload = message.payload.decode('utf-8')
                                     logger.info(f"Response received: {payload}")
                                     received_response = json.loads(payload)
-                                response_received.set()
-                                break
-                            except Exception as e:
-                                logger.error(f"Error processing response: {e}")
-            except Exception as e:
-                logger.error(f"Error in response listener: {e}")
+                                    response_received.set()
+                                    break
+                                except Exception as e:
+                                    logger.error(f"Error processing response: {e}")
+                except Exception as e:
+                    logger.error(f"Error in response listener: {e}")
         
             listener_task = asyncio.create_task(listen_for_response())
             
+            # Inner try block for core test logic (publish, wait, assert)
             try:
                 # Create test request
                 test_request = {
@@ -1034,24 +1033,27 @@ async def test_direct_listener_minimal_test():
                     assert received_response.get("result", {}).get("message") == "Echo: Hello from minimal test", "Unexpected message"
                 except asyncio.TimeoutError:
                     pytest.fail("Timeout waiting for response")
-            finally:
-                # Cleanup listener
-                listener_task.cancel()
-                try:
-                    await listener_task
-                except asyncio.CancelledError:
-                    pass
-    finally:
-        # Cleanup responder
-        responder_task.cancel()
-        try:
-            await responder_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await responder.stop()
-        except Exception:
-            pass
+            finally: # Inner finally for listener_task cleanup
+                if 'listener_task' in locals() and listener_task and not listener_task.done():
+                    listener_task.cancel()
+                    try:
+                        await listener_task
+                    except asyncio.CancelledError:
+                        pass
+    # Outer finally for responder_task cleanup. Ensure this is aligned with the main 'try' of the function.
+    finally: 
+        pass # Add a pass statement to ensure the block is not empty initially
+        if 'responder_task' in locals() and responder_task and not responder_task.done():
+            responder_task.cancel()
+            try:
+                await responder_task
+            except asyncio.CancelledError:
+                pass
+        if 'responder' in locals() and responder and hasattr(responder, 'stop'): 
+            try:
+                await responder.stop()
+            except Exception as e:
+                logger.error(f"Error stopping responder: {e}")
 
 async def test_minimal_direct_mqtt_listener():
     """
@@ -1247,15 +1249,15 @@ async def test_minimal_direct_mqtt_listener():
         finally:
             # Clean up
             monitor_task.cancel()
-                try:
+            try:
                 await monitor_task
-                except asyncio.CancelledError:
-                    pass
+            except asyncio.CancelledError:
+                pass
             
             # Cancel listener task
-            if listener_task:
+            if listener_task and not listener_task.done():
                 listener_task.cancel()
-            try:
+                try:
                     await listener_task
-            except asyncio.CancelledError:
-                pass 
+                except asyncio.CancelledError:
+                    pass 

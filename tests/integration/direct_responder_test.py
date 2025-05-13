@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sys
+import pytest
 from pathlib import Path
 
 # Set up logging
@@ -23,13 +24,15 @@ SCRIPT_DIR = Path(__file__).parent
 FIXTURES_DIR = SCRIPT_DIR / "fixtures"
 RESPONDER_SCRIPT = FIXTURES_DIR / "simple_responder.py"
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)  # Set a timeout for this test
 async def test_responder():
     """Test sending a request to the responder script and receiving a response."""
     
     # Ensure the responder script exists
     if not RESPONDER_SCRIPT.exists():
         logger.error(f"Responder script not found at {RESPONDER_SCRIPT}")
-        return False
+        assert False, f"Responder script not found at {RESPONDER_SCRIPT}"
     
     # Start the responder process
     logger.info(f"Starting responder process: {sys.executable} {RESPONDER_SCRIPT}")
@@ -54,6 +57,8 @@ async def test_responder():
         }
     }
     
+    success = False
+    
     try:
         # Send the request
         request_json = json.dumps(test_request) + "\n"
@@ -67,7 +72,7 @@ async def test_responder():
             response_line = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
             if not response_line:
                 logger.error("Empty response received")
-                return False
+                assert False, "Empty response received"
                 
             # Parse and log the response
             response_str = response_line.decode('utf-8').strip()
@@ -83,40 +88,59 @@ async def test_responder():
                 assert response_data.get("result", {}).get("message") == f"Echo: {test_request['params']['message']}", "Unexpected message"
                 
                 logger.info("Response validation successful")
-                return True
+                success = True
             except json.JSONDecodeError:
                 logger.error(f"Response is not valid JSON: {response_str}")
-                return False
+                assert False, f"Response is not valid JSON: {response_str}"
             except AssertionError as e:
                 logger.error(f"Response validation failed: {e}")
-                return False
+                raise
                 
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for response")
-            return False
+            assert False, "Timeout waiting for response"
             
     finally:
-        # Capture any stderr output for debugging
-        stderr_data = await process.stderr.read()
-        if stderr_data:
-            logger.info(f"Process stderr:\n{stderr_data.decode('utf-8')}")
+        # Try to read stderr, but do so carefully
+        try:
+            # Create a task to read stderr and race it against a sleep
+            stderr_task = asyncio.create_task(process.stderr.read())
+            await asyncio.sleep(0.5)  # Give it a short time to complete
+            
+            if stderr_task.done():
+                stderr_data = stderr_task.result()
+                if stderr_data:
+                    logger.info(f"Process stderr:\n{stderr_data.decode('utf-8')}")
+            else:
+                # If it's not done, cancel it - we don't want to wait forever
+                stderr_task.cancel()
+                logger.info("Skipped reading full stderr - operation would block")
+        except Exception as e:
+            logger.warning(f"Error reading stderr: {e}")
             
         # Terminate the process
         logger.info("Terminating process")
         if process.returncode is None:
-            process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                logger.warning("Process did not terminate gracefully, killing")
-                process.kill()
-                await process.wait()
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Process did not terminate gracefully, killing")
+                    process.kill()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        logger.error("Failed to kill process")
+            except Exception as e:
+                logger.warning(f"Error terminating process: {e}")
+        
+        assert success, "Test failed"
 
 async def main():
     """Main function to run the test."""
-    success = await test_responder()
-    logger.info(f"Test result: {'SUCCESS' if success else 'FAILURE'}")
-    return 0 if success else 1
+    await test_responder()
+    return 0
 
 if __name__ == "__main__":
     exit_code = asyncio.run(main())

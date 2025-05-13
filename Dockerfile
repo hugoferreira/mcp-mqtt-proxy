@@ -1,33 +1,30 @@
-# Build stage with explicit platform specification
-FROM ghcr.io/astral-sh/uv:python3.12-alpine AS uv
+FROM python:3.10-slim
 
-# Install the project into /app
+# Set working directory
 WORKDIR /app
 
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
+# Install git for potential editable dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy from the cache instead of linking since it's a mounted volume
-ENV UV_LINK_MODE=copy
+# Copy files needed for installing dependencies
+COPY pyproject.toml README.md ./
 
-# Install the project's dependencies using the lockfile and settings
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-project --no-dev --no-editable
+# Install dependencies
+# Use pip with --no-cache-dir to keep image size smaller
+RUN pip install --no-cache-dir -e .
 
-# Then, add the rest of the project source code and install it
-# Installing separately from its dependencies allows optimal layer caching
-ADD . /app
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+# Copy source code
+COPY src/ ./src/
 
-# Final stage with explicit platform specification
-FROM python:3.12-alpine
+# Create a non-root user to run the application
+RUN useradd -m -u 1000 mcpuser
+USER mcpuser
 
-COPY --from=uv --chown=app:app /app/.venv /app/.venv
+# Set entry point
+ENTRYPOINT ["python", "-m", "mcp_mqtt_proxy"]
 
-# Place executables in the environment at the front of the path
-ENV PATH="/app/.venv/bin:$PATH"
-
-ENTRYPOINT ["mcp-mqtt-proxy"]
+# Default command
+# Users can override these arguments when running the container
+CMD ["--help"]

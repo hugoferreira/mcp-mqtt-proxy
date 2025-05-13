@@ -17,6 +17,8 @@ import uuid
 import binascii
 from contextlib import asynccontextmanager
 import typing as t
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -328,14 +330,14 @@ async def bridge_stdio_to_anyio_session(
         logger.info(f"[Bridge {session_id}] Context manager finished")
 
 
+@dataclass
 class TestResult:
     """Represents the result of a test operation."""
-    def __init__(self, success: bool, message: str, details: dict = None):
-        self.success = success
-        self.message = message
-        self.details = details or {}
+    success: bool
+    message: str
+    details: Optional[Dict[str, Any]] = None
     
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{'SUCCESS' if self.success else 'FAILURE'}: {self.message}"
 
 
@@ -427,6 +429,9 @@ async def setup_stderr_logger(proc: asyncio.subprocess.Process) -> tuple[asyncio
 
 async def test_initialization(session_stream: StapledObjectStream[BaseModel]) -> TestResult:
     """Test the initialization process."""
+    # This is an old function that was replaced with test_bridge_initialization
+    # It won't be directly called through pytest.
+    # Leaving it here for reference/in case other code calls it
     logger.info("=== Starting initialization test ===")
     
     # Create test initialization request
@@ -440,13 +445,19 @@ async def test_initialization(session_stream: StapledObjectStream[BaseModel]) ->
     
     # Send the initialization request
     logger.info(f"Sending initialization request: {init_request.model_dump_json()}")
-    await session_stream.send(init_request)
-    logger.info("Initialization request sent")
+    with anyio.move_on_after(OPERATION_TIMEOUT):
+        await session_stream.send(init_request)
     
     # Wait for response with timeout
     logger.info("Waiting for initialization response...")
     try:
-        response = await asyncio.wait_for(session_stream.receive(), timeout=5.0)
+        response = None
+        with anyio.move_on_after(OPERATION_TIMEOUT):
+            response = await session_stream.receive()
+        
+        if response is None:
+            return TestResult(False, "Timeout waiting for initialization response")
+            
         logger.info(f"Received response: {response}")
         
         # Check if response is valid
@@ -467,8 +478,6 @@ async def test_initialization(session_stream: StapledObjectStream[BaseModel]) ->
         logger.info("Initialization successful")
         return TestResult(True, "Initialization successful", {"server_info": response.result.get('serverInfo')})
         
-    except asyncio.TimeoutError:
-        return TestResult(False, "Timeout waiting for initialization response")
     except Exception as e:
         return TestResult(False, f"Unexpected error during initialization: {str(e)}", {"exception": str(e)})
 

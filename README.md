@@ -83,54 +83,49 @@ _(Detailed arguments and examples will be added as development progresses)._
 
 ## Docker
 
-A Docker image can be built to run the proxy in a container.
+The project includes a Docker image for containerized deployment.
 
-```Dockerfile
-# Example Dockerfile (Contents will be refined)
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install uv
-RUN pip install uv
-
-# Copy project files
-COPY pyproject.toml uv.lock ./
-COPY src/ ./src
-
-# Install dependencies
-RUN uv pip install --system --no-cache . 
-
-# Default command (example)
-ENTRYPOINT [ "mcp-mqtt-proxy" ]
-CMD [ "--help" ]
-```
-
-Build and run:
+### Running with Docker
 
 ```bash
-# TODO: Update image name/tag
+# Run the container with --help to see available options
+docker run --rm ghcr.io/bytter/mcp-mqtt-proxy:latest
+
+# Run in publisher mode (stdio client -> MQTT)
+docker run --rm --network=host ghcr.io/bytter/mcp-mqtt-proxy:latest \
+  --broker-url mqtt://localhost:1883 \
+  --base-topic mcp/test \
+  -- /path/to/mcp-process
+
+# Run in listener mode (MQTT -> stdio server)
+docker run --rm --network=host ghcr.io/bytter/mcp-mqtt-proxy:latest \
+  --listen \
+  --broker-url mqtt://localhost:1883 \
+  --base-topic mcp/test \
+  --stdio-process "/path/to/mcp/process"
+```
+
+### Building the Docker Image Locally
+
+```bash
+# Build the image
 docker build -t mcp-mqtt-proxy:latest .
-docker run -it --rm mcp-mqtt-proxy:latest --help
+
+# Build with a specific version tag
+docker build -t mcp-mqtt-proxy:v1.0.0 .
 ```
 
-## Testing
+### Continuous Integration
 
-Tests are located in the `tests/` directory and can be run using `pytest` (requires development dependencies installed via `uv pip install -e .[dev]`):
+The project uses GitHub Actions to automatically build and publish Docker images to GitHub Container Registry (ghcr.io) when:
+- Code is pushed to the main branch
+- A version tag (v*) is pushed
 
-```bash
-pytest
-```
+You can find the latest images at: `ghcr.io/bytter/mcp-mqtt-proxy`
 
-### Test Fixtures
 
-The project uses standalone Python scripts for test fixtures rather than embedding code as strings within test files. This makes fixtures:
 
-- Easier to edit (proper syntax highlighting and linting)
-- More maintainable (no need for string escaping)
-- Reusable across multiple test files
 
-Fixtures can be found in the `tests/integration/fixtures/` directory, with `simple_responder.py` serving as a mock MCP server for integration tests.
 
 ## Acknowledgements
 

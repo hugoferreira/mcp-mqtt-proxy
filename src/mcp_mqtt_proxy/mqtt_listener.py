@@ -26,6 +26,7 @@ import paho.mqtt.packettypes as packettypes # Import packet types constants
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from anyio.streams.stapled import StapledObjectStream
 from pydantic import BaseModel, ValidationError
+from anyio import EndOfStream, WouldBlock
 
 # Import MCP client components
 from mcp.client.session import ClientSession
@@ -463,168 +464,250 @@ async def _handle_mqtt_message(
                     props_dict[prop_name] = str(value)
                     logger.debug(f"[MSG-{message_id}] Property {prop_name}: {value}")
     
+    # Determine response topic from MQTTv5 properties or configuration
     response_topic = None
     correlation_data = None
     request_id_for_response = None
     sent_response = False
     
+    # Get ResponseTopic from MQTT v5 properties if available
+    if message.properties and hasattr(message.properties, 'ResponseTopic') and message.properties.ResponseTopic:
+        response_topic = message.properties.ResponseTopic
+        logger.info(f"[MSG-{message_id}] Using ResponseTopic from MQTT properties: {response_topic}")
+    else:
+        # Fall back to configured response topic
+        response_topic = f"{config.base_topic}/response"
+        logger.info(f"[MSG-{message_id}] Using configured response topic: {response_topic}")
+    
+    # Extract CorrelationData for response
+    if message.properties and hasattr(message.properties, 'CorrelationData') and message.properties.CorrelationData:
+        correlation_data = message.properties.CorrelationData
+        logger.info(f"[MSG-{message_id}] Using CorrelationData from MQTT properties")
+        
+    # Parse the message payload
     try:
-        # Extract message properties for response
-        properties = message.properties
+        payload_text = message.payload.decode('utf-8')
+        logger.info(f"[MSG-{message_id}] Decoded message payload from topic {message.topic}: {payload_text[:200]}")
         
-        # Check if this is an MQTT v5 message with ResponseTopic property
-        if properties:
-            # Get response topic from properties
-            response_topic = getattr(properties, "ResponseTopic", None)
-            correlation_data = getattr(properties, "CorrelationData", None)
-            
-        # If no ResponseTopic is found, use a default based on the base topic
-        if not response_topic:
-            logger.info(f"[MSG-{message_id}] No response topic in properties, constructing a default one")
-            # Default to a generic response topic in same hierarchy
-            response_topic = f"{config.base_topic}/response"
-            logger.info(f"[MSG-{message_id}] Using default response topic: {response_topic}")
-        
-        # Parse the message payload
+        # Parse the JSON payload
         try:
-            payload_text = message.payload.decode('utf-8')
-            logger.info(f"[MSG-{message_id}] Decoded message payload from topic {message.topic}: {payload_text[:200]}")
+            logger.debug(f"[MSG-{message_id}] Parsing JSON payload...")
+            request_data = json.loads(payload_text)
+            logger.info(f"[MSG-{message_id}] Parsed JSON request with type: {type(request_data)}")
+            logger.debug(f"[MSG-{message_id}] Request data: {json.dumps(request_data, indent=2)}")
             
-            # Parse the JSON payload
-            try:
-                logger.debug(f"[MSG-{message_id}] Parsing JSON payload...")
-                request_data = json.loads(payload_text)
-                logger.info(f"[MSG-{message_id}] Parsed JSON request with type: {type(request_data)}")
-                logger.debug(f"[MSG-{message_id}] Request data: {json.dumps(request_data, indent=2)}")
+            # Extract request ID for correlation
+            if 'id' in request_data:
+                request_id_for_response = request_data['id']
+                logger.info(f"[MSG-{message_id}] Request ID: {request_id_for_response}")
+            
+            # Create a simple direct response to test if routing works
+            if request_data.get('method') == 'test/echo':
+                logger.info(f"[MSG-{message_id}] Detected test/echo method, handling directly for testing")
                 
-                # Extract request ID for correlation
-                if 'id' in request_data:
-                    request_id_for_response = request_data['id']
-                    logger.info(f"[MSG-{message_id}] Request ID: {request_id_for_response}")
+                # Create direct response for the echo method to test routing
+                echo_message = request_data.get('params', {}).get('message', '')
+                logger.info(f"[MSG-{message_id}] Echo message parameter: '{echo_message}'")
                 
-                # Create a simple direct response to test if routing works
-                if request_data.get('method') == 'test/echo':
-                    logger.info(f"[MSG-{message_id}] Detected test/echo method, handling directly for testing")
-                    
-                    # Create direct response for the echo method to test routing
-                    echo_message = request_data.get('params', {}).get('message', '')
-                    logger.info(f"[MSG-{message_id}] Echo message parameter: '{echo_message}'")
-                    
-                    response_data = {
-                        "jsonrpc": "2.0",
-                        "id": request_id_for_response,
-                        "result": {
-                            "message": f"Echo: {echo_message}"
-                        }
-                    }
-                    
-                    # Convert to JSON
-                    response_json = json.dumps(response_data)
-                    logger.info(f"[MSG-{message_id}] Direct echo response created: {response_json}")
-                    
-                    # Create MQTT properties for response if needed
-                    resp_properties = None
-                    if correlation_data:
-                        logger.debug(f"[MSG-{message_id}] Creating response properties with CorrelationData")
-                        resp_properties = mqtt_properties.Properties(mqtt_properties.PacketTypes.PUBLISH)
-                        if isinstance(correlation_data, bytes):
-                            resp_properties.CorrelationData = correlation_data
-                            logger.debug(f"[MSG-{message_id}] Set binary CorrelationData: {correlation_data}")
-                        else:
-                            encoded_corr = str(correlation_data).encode('utf-8')
-                            resp_properties.CorrelationData = encoded_corr
-                            logger.debug(f"[MSG-{message_id}] Set encoded CorrelationData: {encoded_corr}")
-                    
-                    # Publish the response
-                    logger.info(f"[MSG-{message_id}] Publishing echo response to {response_topic}")
-                    response_bytes = response_json.encode('utf-8')
-                    logger.debug(f"[MSG-{message_id}] Response bytes ({len(response_bytes)} bytes):\n{hex_dump(response_bytes, '  ')}")
-                    
-                    await mqtt_client.publish(
-                        response_topic,
-                        payload=response_bytes,
-                        qos=config.qos,
-                        properties=resp_properties
-                    )
-                    logger.info(f"[MSG-{message_id}] Direct echo response published successfully")
-                    sent_response = True
-                    return
-                
-                # For non-echo methods, we would forward to MCP (uncomment when echo works)
-                logger.info(f"[MSG-{message_id}] Method {request_data.get('method')} not handled directly, would forward to MCP")
-                
-                # Normal processing using session.request (currently disabled)
-                """
-                logger.info(f"Sending request to MCP session: {request_data.get('method')}")
-                try:
-                    raw_response = await asyncio.wait_for(
-                        session.request(request_data),
-                        timeout=config.mcp_timeout
-                    )
-                    
-                    # Convert response to JSON and publish
-                    response_dict = {}
-                    if hasattr(raw_response, "model_dump"):
-                        response_dict = raw_response.model_dump(mode='json')
-                    else:
-                        response_dict = dict(raw_response) if not isinstance(raw_response, dict) else raw_response
-                    
-                    # Publish the response
-                    response_json = json.dumps(response_dict)
-                    
-                    # Set up MQTT response properties
-                    mqtt_props = None
-                    if correlation_data:
-                        mqtt_props = mqtt_properties.Properties(mqtt_properties.PacketTypes.PUBLISH)
-                        if isinstance(correlation_data, bytes):
-                            mqtt_props.CorrelationData = correlation_data
-                        else:
-                            mqtt_props.CorrelationData = str(correlation_data).encode('utf-8')
-                    
-                    await mqtt_client.publish(
-                        response_topic,
-                        payload=response_json.encode(),
-                        qos=config.qos,
-                        properties=mqtt_props
-                    )
-                    logger.info(f"Response published to {response_topic}")
-                except Exception as e:
-                    logger.exception(f"Error processing request through MCP: {e}")
-                    # Send error response
-                    error_response = {
-                        "jsonrpc": "2.0",
-                        "id": request_id_for_response,
-                        "error": {
-                            "code": -32603,
-                            "message": f"Internal error: {str(e)}"
-                        }
-                    }
-                    await mqtt_client.publish(
-                        response_topic,
-                        json.dumps(error_response).encode('utf-8'),
-                        qos=config.qos
-                    )
-                """
-            except json.JSONDecodeError as e:
-                logger.error(f"[MSG-{message_id}] Invalid JSON in message: {e}")
-                logger.debug(f"[MSG-{message_id}] Raw message with JSON error: {payload_text}")
-                
-                error_resp = {
+                response_data = {
                     "jsonrpc": "2.0",
-                    "id": None,
+                    "id": request_id_for_response,
+                    "result": {
+                        "message": f"Echo: {echo_message}"
+                    }
+                }
+                
+                # Convert to JSON
+                response_json = json.dumps(response_data)
+                logger.info(f"[MSG-{message_id}] Direct echo response created: {response_json}")
+                
+                # Create MQTT properties for response if needed
+                resp_properties = None
+                if correlation_data:
+                    logger.debug(f"[MSG-{message_id}] Creating response properties with CorrelationData")
+                    resp_properties = mqtt_properties.Properties(mqtt_properties.PacketTypes.PUBLISH)
+                    if isinstance(correlation_data, bytes):
+                        resp_properties.CorrelationData = correlation_data
+                        logger.debug(f"[MSG-{message_id}] Set binary CorrelationData: {correlation_data}")
+                    else:
+                        encoded_corr = str(correlation_data).encode('utf-8')
+                        resp_properties.CorrelationData = encoded_corr
+                        logger.debug(f"[MSG-{message_id}] Set encoded CorrelationData: {encoded_corr}")
+                
+                # Publish the response
+                logger.info(f"[MSG-{message_id}] Publishing echo response to {response_topic}")
+                response_bytes = response_json.encode('utf-8')
+                logger.debug(f"[MSG-{message_id}] Response bytes ({len(response_bytes)} bytes):\n{hex_dump(response_bytes, '  ')}")
+                
+                await mqtt_client.publish(
+                    response_topic,
+                    payload=response_bytes,
+                    qos=config.qos,
+                    properties=resp_properties
+                )
+                logger.info(f"[MSG-{message_id}] Direct echo response published successfully")
+                sent_response = True
+                return
+            
+            # For non-echo methods, forward to MCP
+            logger.info(f"[MSG-{message_id}] Method {request_data.get('method')} - forwarding to MCP session")
+            
+            # Parse the request data into a proper MCP Request object if possible
+            mcp_request = None
+            try:
+                # First try to create a specific request type based on the method
+                # This is a more robust approach than using generic Request
+                method_name = request_data.get('method')
+                
+                # Try to parse with the general Request model first
+                mcp_request = _parse_mcp_message_from_json(message.payload)
+                if mcp_request:
+                    logger.info(f"[MSG-{message_id}] Successfully parsed request as {type(mcp_request).__name__}")
+                else:
+                    # Fallback to direct dictionary pass-through
+                    logger.warning(f"[MSG-{message_id}] Could not parse as MCP Request model, using raw dict")
+                    mcp_request = request_data
+                
+            except Exception as parse_err:
+                logger.warning(f"[MSG-{message_id}] Error parsing request as MCP model: {parse_err}")
+                # Fallback to direct dictionary pass-through
+                mcp_request = request_data
+            
+            # Forward the request to the MCP session
+            logger.info(f"[MSG-{message_id}] Sending request to MCP session: {request_data.get('method')}")
+            try:
+                # Use the parsed request or raw dict
+                raw_response = await asyncio.wait_for(
+                    session.request(mcp_request),
+                    timeout=config.mcp_timeout
+                )
+                
+                # Convert response to JSON for publishing
+                response_dict = {}
+                
+                # Handle different response types
+                if hasattr(raw_response, "model_dump"):
+                    # If it's a Pydantic model with model_dump method
+                    try:
+                        response_dict = raw_response.model_dump(mode='json')
+                        logger.debug(f"[MSG-{message_id}] Response converted using model_dump(): {type(response_dict)}")
+                    except Exception as e:
+                        logger.warning(f"[MSG-{message_id}] Error using model_dump(): {e}, trying dict conversion")
+                        response_dict = dict(raw_response)
+                elif hasattr(raw_response, "dict"):
+                    # Older Pydantic v1 compatibility
+                    try:
+                        response_dict = raw_response.dict()
+                        logger.debug(f"[MSG-{message_id}] Response converted using dict(): {type(response_dict)}")
+                    except Exception as e:
+                        logger.warning(f"[MSG-{message_id}] Error using dict(): {e}, trying direct conversion")
+                        response_dict = dict(raw_response)
+                elif isinstance(raw_response, dict):
+                    # If it's already a dict
+                    response_dict = raw_response
+                    logger.debug(f"[MSG-{message_id}] Response is already a dict: {type(response_dict)}")
+                else:
+                    # Try to convert to dict if possible, otherwise stringify
+                    try:
+                        response_dict = dict(raw_response)
+                        logger.debug(f"[MSG-{message_id}] Response converted to dict: {type(response_dict)}")
+                    except Exception as e:
+                        logger.warning(f"[MSG-{message_id}] Cannot convert response to dict: {e}")
+                        response_dict = {
+                            "jsonrpc": "2.0", 
+                            "id": request_id_for_response,
+                            "result": str(raw_response)
+                        }
+                
+                # Ensure JSON-RPC structure
+                if "jsonrpc" not in response_dict:
+                    response_dict["jsonrpc"] = "2.0"
+                if "id" not in response_dict and request_id_for_response:
+                    response_dict["id"] = request_id_for_response
+                
+                # Convert to JSON
+                response_json = json.dumps(response_dict)
+                logger.info(f"[MSG-{message_id}] Response ready: {response_json[:200]}")
+                
+                # Set up MQTT response properties
+                mqtt_props = None
+                if correlation_data:
+                    mqtt_props = mqtt_properties.Properties(mqtt_properties.PacketTypes.PUBLISH)
+                    if isinstance(correlation_data, bytes):
+                        mqtt_props.CorrelationData = correlation_data
+                    else:
+                        mqtt_props.CorrelationData = str(correlation_data).encode('utf-8')
+                
+                # Publish the response
+                await mqtt_client.publish(
+                    response_topic,
+                    payload=response_json.encode(),
+                    qos=config.qos,
+                    properties=mqtt_props
+                )
+                logger.info(f"[MSG-{message_id}] Response published to {response_topic}")
+                sent_response = True
+                
+            except asyncio.TimeoutError as timeout_err:
+                logger.error(f"[MSG-{message_id}] Timeout waiting for MCP response: {timeout_err}")
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id_for_response,
                     "error": {
-                        "code": -32700,
-                        "message": f"Parse error: {str(e)}"
+                        "code": -32000,
+                        "message": f"Request timed out after {config.mcp_timeout}s"
                     }
                 }
                 await mqtt_client.publish(
                     response_topic,
-                    json.dumps(error_resp).encode('utf-8'),
-                    qos=config.qos
+                    json.dumps(error_response).encode('utf-8'),
+                    qos=config.qos,
+                    properties=mqtt_props if 'mqtt_props' in locals() else None
                 )
-        except UnicodeDecodeError as e:
-            logger.error(f"[MSG-{message_id}] Cannot decode message payload as UTF-8: {e}")
-            logger.debug(f"[MSG-{message_id}] Binary payload:\n{hex_dump(message.payload, '  ')}")
+                sent_response = True
+                
+            except Exception as e:
+                logger.exception(f"[MSG-{message_id}] Error processing request through MCP: {e}")
+                # Send error response
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id_for_response,
+                    "error": {
+                        "code": -32603,
+                        "message": f"Internal error: {str(e)}"
+                    }
+                }
+                await mqtt_client.publish(
+                    response_topic,
+                    json.dumps(error_response).encode('utf-8'),
+                    qos=config.qos,
+                    properties=mqtt_props if 'mqtt_props' in locals() else None
+                )
+                sent_response = True
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"[MSG-{message_id}] Invalid JSON in message: {e}")
+            logger.debug(f"[MSG-{message_id}] Raw message with JSON error: {payload_text}")
+            
+            error_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32700,
+                    "message": f"Parse error: {str(e)}"
+                }
+            }
+            await mqtt_client.publish(
+                response_topic,
+                json.dumps(error_resp).encode('utf-8'),
+                qos=config.qos
+            )
+            sent_response = True
+            
+    except UnicodeDecodeError as e:
+        logger.error(f"[MSG-{message_id}] Cannot decode message payload as UTF-8: {e}")
+        logger.debug(f"[MSG-{message_id}] Binary payload:\n{hex_dump(message.payload, '  ')}")
+        
     except Exception as e:
         logger.exception(f"[MSG-{message_id}] Unexpected error handling MQTT message: {e}")
         if not sent_response and response_topic:
@@ -642,6 +725,7 @@ async def _handle_mqtt_message(
                     json.dumps(error_resp).encode('utf-8'),
                     qos=config.qos
                 )
+                sent_response = True
             except Exception as send_err:
                 logger.exception(f"[MSG-{message_id}] Failed to send error response: {send_err}")
     finally:
@@ -764,22 +848,123 @@ async def run_mqtt_listener(
             # Slight delay to ensure subscriptions are active
             logger.info("Waiting for MQTT subscriptions to settle...")
             await asyncio.sleep(1.0)
-
-            logger.info("Starting main MQTT message loop...")
             
-            # Create exit event for timeout if specified
+            # Create a notification topic for events
+            notification_topic = f"{config.base_topic}/notifications"
+            
+            # Setup task to forward notifications from the MCP session to MQTT
+            async def forward_notifications():
+                """Forward notifications from the MCP session to MQTT."""
+                logger.info("Starting notification forwarder")
+                try:
+                    # Look for notification message in the stdio reader
+                    # A notification is a SessionMessage with a method and no ID
+                    # The reader is continuously reading from the stdio process and
+                    # forwarding messages to the session, so we need to filter
+                    reader_task = asyncio.current_task().get_name()
+                    logger.debug(f"Notification forwarder running in task: {reader_task}")
+                    
+                    # We need to know what kind of stream we're dealing with
+                    if hasattr(session, '_read_stream'):
+                        stream = session._read_stream
+                        logger.debug(f"Found session._read_stream of type {type(stream)}")
+                    else:
+                        logger.warning("Session does not have a _read_stream attribute, using bridge directly")
+                        # We don't have direct access to the stream, fall back to checking the bridge directly
+                        stream = None
+                    
+                    # Just continue reading all bridge reader messages
+                    # We'll look for notifications (messages with a method but no ID)
+                    while True:
+                        try:
+                            # Try to receive a message with a timeout using proper anyio methods
+                            try:
+                                # Use a short timeout to avoid blocking indefinitely
+                                message = None
+                                if stream is not None:
+                                    with anyio.move_on_after(0.1) as scope:  # 100ms timeout
+                                        message = await stream.receive()
+                                
+                                if message is None:
+                                    # No message, or no stream - sleep briefly and try again
+                                    await asyncio.sleep(0.1)
+                                    continue
+                                    
+                                # Check if this is a notification (has method but no id)
+                                if not hasattr(message, 'id') or message.id is None:
+                                    if hasattr(message, 'method') and message.method:
+                                        # This is a notification
+                                        logger.info(f"Received notification: {message.method}")
+                                        logger.debug(f"Notification details: {message}")
+                                        
+                                        # Convert notification to JSON
+                                        if hasattr(message, "model_dump_json"):
+                                            notification_json = message.model_dump_json()
+                                        elif hasattr(message, "dict"):
+                                            notification_dict = message.dict()
+                                            notification_json = json.dumps(notification_dict)
+                                        else:
+                                            # Try to convert to dict
+                                            try:
+                                                notification_dict = dict(message)
+                                                notification_json = json.dumps(notification_dict)
+                                            except Exception as e:
+                                                logger.warning(f"Cannot convert notification to JSON: {e}")
+                                                # Create a minimal JSON structure
+                                                notification_json = json.dumps({
+                                                    "jsonrpc": "2.0", 
+                                                    "method": getattr(message, "method", "unknown"),
+                                                    "params": {
+                                                        "message": str(message)
+                                                    }
+                                                })
+                                        
+                                        # Publish the notification to MQTT
+                                        logger.info(f"Publishing notification to {notification_topic}: {message.method}")
+                                        await mqtt_client.publish(
+                                            notification_topic,
+                                            payload=notification_json.encode(),
+                                            qos=config.qos
+                                        )
+                                        logger.debug(f"Notification published: {message.method}")
+                            except anyio.EndOfStream:
+                                logger.info("End of stream reached")
+                                break
+                            except anyio.WouldBlock:
+                                # No message available, wait a bit
+                                await asyncio.sleep(0.1)
+                        except Exception as e:
+                            logger.exception(f"Error processing notification: {e}")
+                            await asyncio.sleep(0.5)  # Add delay to avoid tight loop on error
+                except asyncio.CancelledError:
+                    logger.info("Notification forwarder task cancelled")
+                except Exception as e:
+                    logger.exception(f"Unhandled error in notification forwarder: {e}")
+                finally:
+                    logger.info("Notification forwarder exiting")
+            
+            # Create and start the notification forwarder task
+            notification_task = asyncio.create_task(forward_notifications(), name="notification-forwarder")
+            
+            # Set up a manual timeout if configured
             timeout_task = None
             if config.debug_timeout:
-                async def exit_after_timeout():
-                    logger.info(f"Debug timeout set: will exit after {config.debug_timeout} seconds")
-                    await asyncio.sleep(config.debug_timeout)
-                    logger.info("Debug timeout reached, initiating shutdown")
-                    # Using CancelledError to trigger orderly shutdown via the finally block
-                    raise asyncio.CancelledError("Debug timeout reached")
+                logger.info(f"Setting up server timeout of {config.debug_timeout} seconds")
                 
-                timeout_task = asyncio.create_task(exit_after_timeout())
-            
-            # Use a completely different approach similar to our working test
+                async def timeout_server():
+                    try:
+                        await asyncio.sleep(config.debug_timeout)
+                        logger.warning(f"Server timeout of {config.debug_timeout}s reached")
+                        # This will cause the listener to gracefully shut down
+                        raise asyncio.CancelledError("Server timeout reached")
+                    except asyncio.CancelledError:
+                        logger.info("Timeout task cancelled before timeout reached")
+                        raise
+                
+                timeout_task = asyncio.create_task(timeout_server(), name="timeout")
+
+            # Main message handling loop - this will run indefinitely until cancelled
+            logger.info("Starting main MQTT message loop...")
             try:
                 async with mqtt_client.messages() as messages:
                     async for message in messages:
@@ -807,6 +992,15 @@ async def run_mqtt_listener(
                             
                 logger.info("MQTT message loop completed normally")
             finally:
+                # Cancel notification task
+                if notification_task and not notification_task.done():
+                    logger.info("Cancelling notification forwarder task")
+                    notification_task.cancel()
+                    try:
+                        await notification_task
+                    except asyncio.CancelledError:
+                        pass
+                    
                 # Cancel timeout task if it exists
                 if timeout_task and not timeout_task.done():
                     timeout_task.cancel()
@@ -841,41 +1035,45 @@ async def run_mqtt_listener(
                     logger.warning("Session doesn't have close() or aclose() method")
             except Exception as e:
                 logger.exception(f"Error closing MCP session: {e}")
-
-        # Terminate server process (bridge cleanup happens via context manager exit)
-        if server_proc and server_proc.returncode is None:
-            logger.info(f"Terminating stdio server process (PID: {server_proc.pid})...")
-            try:
-                server_proc.terminate()
-                # Wait briefly for termination
-                await asyncio.wait_for(server_proc.wait(), timeout=5.0)
-                logger.info(f"Stdio server process (PID: {server_proc.pid}) terminated.")
-            except asyncio.TimeoutError:
-                logger.warning(f"Stdio server process (PID: {server_proc.pid}) did not terminate gracefully, killing.")
-                server_proc.kill()
-            except ProcessLookupError:
-                 logger.info(f"Stdio server process (PID: {server_proc.pid}) already terminated.")
-            except Exception:
-                 logger.exception(f"Error terminating stdio server process (PID: {server_proc.pid})")
-            finally:
-                # Ensure stderr is read even if termination fails/succeeds
-                if server_proc.stderr:
-                    # Try a single large read during cleanup
-                    try:
-                        final_stderr = await asyncio.wait_for(server_proc.stderr.read(), timeout=0.5) # Read everything with a short timeout
-                        if final_stderr:
-                             logger.info(f"Stdio server process final stderr (PID: {server_proc.pid}):\n{final_stderr.decode(errors='ignore')}")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Timeout reading final stderr from server process (PID: {server_proc.pid}).")
-                    except Exception as e:
-                        logger.error(f"Error reading final stderr from server process (PID: {server_proc.pid}): {e}")
-
-        # Disconnect MQTT client 
+        
+        # Disconnect from MQTT broker
         if mqtt_client:
             logger.info("Disconnecting from MQTT broker...")
             try:
                 await mqtt_client.disconnect()
+                logger.info("MQTT client disconnected successfully")
             except Exception as e:
-                logger.warning(f"Error disconnecting MQTT client: {e}")
-
-        logger.info("MQTT listener shut down.")
+                logger.exception(f"Error disconnecting from MQTT broker: {e}")
+        
+        # Terminate child process if it's still running
+        if server_proc:
+            if server_proc.returncode is None:
+                logger.info(f"Terminating child process (PID: {server_proc.pid})...")
+                try:
+                    # Try to terminate gracefully first
+                    server_proc.terminate()
+                    try:
+                        # Wait for process to terminate with timeout
+                        await asyncio.wait_for(server_proc.wait(), timeout=2.0)
+                        logger.info(f"Child process terminated with code {server_proc.returncode}")
+                    except asyncio.TimeoutError:
+                        # If it doesn't terminate in time, kill it
+                        logger.warning("Process did not terminate gracefully, killing...")
+                        server_proc.kill()
+                        await server_proc.wait()
+                        logger.info(f"Child process killed")
+                except Exception as e:
+                    logger.exception(f"Error terminating child process: {e}")
+            else:
+                logger.info(f"Child process already exited with code {server_proc.returncode}")
+                
+            # Optionally read any remaining stderr for diagnostics
+            if server_proc.stderr:
+                try:
+                    remaining_stderr = await server_proc.stderr.read()
+                    if remaining_stderr:
+                        logger.info(f"Final stderr output:\n{remaining_stderr.decode(errors='ignore')}")
+                except Exception as e:
+                    logger.exception(f"Error reading final stderr: {e}")
+        
+        logger.info("MQTT listener shutdown complete")

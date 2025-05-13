@@ -369,7 +369,7 @@ async def _stdio_writer(
                     
                     # Convert to JSON
                     json_line = msg.model_dump_json()
-                
+                    
                 # Log the message content
                 logger.info(f"[Writer {session_id}] Sending line {write_counter}: {json_line[:100]}")
                 logger.debug(f"[Writer {session_id}] Full JSON: {json_line}")
@@ -472,7 +472,7 @@ async def _handle_mqtt_message(
     
     # Get ResponseTopic from MQTT v5 properties if available
     if message.properties and hasattr(message.properties, 'ResponseTopic') and message.properties.ResponseTopic:
-        response_topic = message.properties.ResponseTopic
+            response_topic = message.properties.ResponseTopic
         logger.info(f"[MSG-{message_id}] Using ResponseTopic from MQTT properties: {response_topic}")
     else:
         # Fall back to configured response topic
@@ -481,9 +481,9 @@ async def _handle_mqtt_message(
     
     # Extract CorrelationData for response
     if message.properties and hasattr(message.properties, 'CorrelationData') and message.properties.CorrelationData:
-        correlation_data = message.properties.CorrelationData
+            correlation_data = message.properties.CorrelationData
         logger.info(f"[MSG-{message_id}] Using CorrelationData from MQTT properties")
-        
+
     # Parse the message payload
     try:
         payload_text = message.payload.decode('utf-8')
@@ -548,7 +548,7 @@ async def _handle_mqtt_message(
                 logger.info(f"[MSG-{message_id}] Direct echo response published successfully")
                 sent_response = True
                 return
-            
+                
             # For non-echo methods, forward to MCP
             logger.info(f"[MSG-{message_id}] Method {request_data.get('method')} - forwarding to MCP session")
             
@@ -581,7 +581,7 @@ async def _handle_mqtt_message(
                     session.request(mcp_request),
                     timeout=config.mcp_timeout
                 )
-                
+                    
                 # Convert response to JSON for publishing
                 response_dict = {}
                 
@@ -591,7 +591,7 @@ async def _handle_mqtt_message(
                     try:
                         response_dict = raw_response.model_dump(mode='json')
                         logger.debug(f"[MSG-{message_id}] Response converted using model_dump(): {type(response_dict)}")
-                    except Exception as e:
+                except Exception as e:
                         logger.warning(f"[MSG-{message_id}] Error using model_dump(): {e}, trying dict conversion")
                         response_dict = dict(raw_response)
                 elif hasattr(raw_response, "dict"):
@@ -606,12 +606,12 @@ async def _handle_mqtt_message(
                     # If it's already a dict
                     response_dict = raw_response
                     logger.debug(f"[MSG-{message_id}] Response is already a dict: {type(response_dict)}")
-                else:
+                    else:
                     # Try to convert to dict if possible, otherwise stringify
                     try:
                         response_dict = dict(raw_response)
                         logger.debug(f"[MSG-{message_id}] Response converted to dict: {type(response_dict)}")
-                    except Exception as e:
+                except Exception as e:
                         logger.warning(f"[MSG-{message_id}] Cannot convert response to dict: {e}")
                         response_dict = {
                             "jsonrpc": "2.0", 
@@ -635,10 +635,10 @@ async def _handle_mqtt_message(
                     mqtt_props = mqtt_properties.Properties(mqtt_properties.PacketTypes.PUBLISH)
                     if isinstance(correlation_data, bytes):
                         mqtt_props.CorrelationData = correlation_data
-                    else:
+            else:
                         mqtt_props.CorrelationData = str(correlation_data).encode('utf-8')
-                
-                # Publish the response
+
+            # Publish the response
                 await mqtt_client.publish(
                     response_topic,
                     payload=response_json.encode(),
@@ -665,8 +665,8 @@ async def _handle_mqtt_message(
                     properties=mqtt_props if 'mqtt_props' in locals() else None
                 )
                 sent_response = True
-                
-            except Exception as e:
+
+    except Exception as e:
                 logger.exception(f"[MSG-{message_id}] Error processing request through MCP: {e}")
                 # Send error response
                 error_response = {
@@ -697,11 +697,11 @@ async def _handle_mqtt_message(
                     "message": f"Parse error: {str(e)}"
                 }
             }
-            await mqtt_client.publish(
-                response_topic,
+                await mqtt_client.publish(
+                    response_topic,
                 json.dumps(error_resp).encode('utf-8'),
-                qos=config.qos
-            )
+                    qos=config.qos
+                )
             sent_response = True
             
     except UnicodeDecodeError as e:
@@ -799,17 +799,17 @@ async def run_mqtt_listener(
             # We'll continue even if initialize fails or times out, since not all servers support it
             try:
                 logger.info("Trying to initialize MCP session...")
-                try:
+                 try:
                     # Attempt initialize with short timeout
                     init_task = asyncio.create_task(session.initialize())
                     init_result = await asyncio.wait_for(
                         init_task,
                         timeout=2.0  # Quick timeout
                     )
-                    logger.info(f"MCP session initialized successfully. Server info: {init_result.serverInfo}")
+                     logger.info(f"MCP session initialized successfully. Server info: {init_result.serverInfo}")
                 except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(f"MCP session initialization skipped: {e}. Proceeding without initialization.")
-            except Exception as e:
+                 except Exception as e:
                 logger.warning(f"Error during MCP session initialization: {e}. Continuing anyway.")
 
             # --- Connect to MQTT Broker ---
@@ -848,7 +848,7 @@ async def run_mqtt_listener(
             # Slight delay to ensure subscriptions are active
             logger.info("Waiting for MQTT subscriptions to settle...")
             await asyncio.sleep(1.0)
-            
+
             # Create a notification topic for events
             notification_topic = f"{config.base_topic}/notifications"
             
@@ -896,7 +896,7 @@ async def run_mqtt_listener(
                                         # This is a notification
                                         logger.info(f"Received notification: {message.method}")
                                         logger.debug(f"Notification details: {message}")
-                                        
+            
                                         # Convert notification to JSON
                                         if hasattr(message, "model_dump_json"):
                                             notification_json = message.model_dump_json()
@@ -953,7 +953,7 @@ async def run_mqtt_listener(
                 
                 async def timeout_server():
                     try:
-                        await asyncio.sleep(config.debug_timeout)
+                    await asyncio.sleep(config.debug_timeout)
                         logger.warning(f"Server timeout of {config.debug_timeout}s reached")
                         # This will cause the listener to gracefully shut down
                         raise asyncio.CancelledError("Server timeout reached")
@@ -962,7 +962,7 @@ async def run_mqtt_listener(
                         raise
                 
                 timeout_task = asyncio.create_task(timeout_server(), name="timeout")
-
+            
             # Main message handling loop - this will run indefinitely until cancelled
             logger.info("Starting main MQTT message loop...")
             try:
@@ -1035,7 +1035,7 @@ async def run_mqtt_listener(
                     logger.warning("Session doesn't have close() or aclose() method")
             except Exception as e:
                 logger.exception(f"Error closing MCP session: {e}")
-        
+
         # Disconnect from MQTT broker
         if mqtt_client:
             logger.info("Disconnecting from MQTT broker...")
@@ -1049,17 +1049,17 @@ async def run_mqtt_listener(
         if server_proc:
             if server_proc.returncode is None:
                 logger.info(f"Terminating child process (PID: {server_proc.pid})...")
-                try:
+            try:
                     # Try to terminate gracefully first
-                    server_proc.terminate()
+                server_proc.terminate()
                     try:
                         # Wait for process to terminate with timeout
                         await asyncio.wait_for(server_proc.wait(), timeout=2.0)
                         logger.info(f"Child process terminated with code {server_proc.returncode}")
-                    except asyncio.TimeoutError:
+            except asyncio.TimeoutError:
                         # If it doesn't terminate in time, kill it
                         logger.warning("Process did not terminate gracefully, killing...")
-                        server_proc.kill()
+                server_proc.kill()
                         await server_proc.wait()
                         logger.info(f"Child process killed")
                 except Exception as e:
@@ -1068,12 +1068,12 @@ async def run_mqtt_listener(
                 logger.info(f"Child process already exited with code {server_proc.returncode}")
                 
             # Optionally read any remaining stderr for diagnostics
-            if server_proc.stderr:
+                if server_proc.stderr:
                 try:
                     remaining_stderr = await server_proc.stderr.read()
                     if remaining_stderr:
                         logger.info(f"Final stderr output:\n{remaining_stderr.decode(errors='ignore')}")
-                except Exception as e:
+                    except Exception as e:
                     logger.exception(f"Error reading final stderr: {e}")
-        
+
         logger.info("MQTT listener shutdown complete")

@@ -120,12 +120,16 @@ addopts = ["--import-mode=importlib", "--timeout=30"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 norecursedirs = [
-    "tests/integration/fixtures", 
+    "tests/fixtures", 
     "tests/integration/direct_responder_test.py",
-    "tests/integration/stdio_bridge_test.py",
+    "tests/integration/stdio_bridge_test.py", 
     "tests/integration/direct_stdio_test.py",
     "tests/mcp_servers"
 ]
 markers = [
+    "slow: marks tests as slow (generally avoid running often)",
     "performance: marks tests as performance tests (slow, resource intensive)",
+    "mqtt: marks tests that require an MQTT broker",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
 ]

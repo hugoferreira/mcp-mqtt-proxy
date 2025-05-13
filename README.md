@@ -123,10 +123,6 @@ The project uses GitHub Actions to automatically build and publish Docker images
 
 You can find the latest images at: `ghcr.io/bytter/mcp-mqtt-proxy`
 
-
-
-
-
 ## Acknowledgements
 
 This project is derived from the original [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy) by Sergey Parfenyuk, which provides the foundation for stdio/MCP handling and the overall proxy structure.

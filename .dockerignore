@@ -1,0 +1,54 @@
+# Exclude development and test files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Git files
+.git/
+.gitignore
+.github/
+
+# Docker files (except the Dockerfile itself)
+docker-compose*.yml
+
+# Documentation and notes
+docs/
+*.md
+!README.md
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# CI/CD configuration
+.gitlab-ci.yml
+codecov.yml
+tox.ini
+
+# Exclude test directory
+tests/
+
+# Other project files not needed in container
+notebooks/
+examples/
+build/
+dist/
+*.egg-info/ 

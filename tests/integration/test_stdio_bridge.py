@@ -13,12 +13,17 @@ import uuid
 import os
 import sys
 
-from tests.fixtures.bridges.stdio_bridge import (
-    bridge_stdio_to_anyio_session,
+from tests.fixtures.bridges.bridge_utils import (
     JSONRPCRequest,
     DynamicResponse,
+    TestResult,
+    bridge_stdio_to_anyio_session,
+    send_jsonrpc_request,
+    wait_for_jsonrpc_response,
+    request_response,
+    initialize_session,
     setup_stderr_logger,
-    DEFAULT_BRIDGE_TIMEOUT
+    DEFAULT_IO_TIMEOUT
 )
 
 logger = logging.getLogger(__name__)
@@ -45,64 +50,53 @@ async def session_stream(simple_responder_process):
         yield stream
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)  # Apply test-level timeout
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_bridge_functionality(simple_responder_process):
     """Test bridging a stdio process to anyio streams."""
     # Set up stderr logging
     stderr_task = await setup_stderr_logger(simple_responder_process)
     
     try:
-        # Bridge the stdio process using our bridge function
-        session_id = "test-bridge-session"
+        # Bridge the stdio process
+        session_id = f"test-bridge-{uuid.uuid4()}"
+        logger.info(f"Starting bridge test with session ID: {session_id}")
+        
         async with bridge_stdio_to_anyio_session(
-            simple_responder_process, session_id, timeout=5
+            simple_responder_process, session_id, timeout=OPERATION_TIMEOUT
         ) as session_stream:
-            # Create a test request
-            request = JSONRPCRequest(
-                jsonrpc="2.0",
-                id="test-echo-1",
+            # Create and send a test request
+            test_params = {"message": "Hello through bridge"}
+            request_id, _ = await send_jsonrpc_request(
+                stream=session_stream,
                 method="test/echo",
-                params={
-                    "message": "Hello through bridge"
-                }
+                params=test_params,
+                timeout=OPERATION_TIMEOUT
             )
             
-            # Send the request through the bridge
-            logger.info(f"Sending request through bridge: {request}")
-            with anyio.move_on_after(OPERATION_TIMEOUT):
-                await session_stream.send(request)
+            # Wait for the response
+            response = await wait_for_jsonrpc_response(
+                stream=session_stream,
+                request_id=request_id,
+                timeout=OPERATION_TIMEOUT
+            )
             
-            # Wait for a response
-            logger.info("Waiting for response...")
-            response = None
-            with anyio.move_on_after(OPERATION_TIMEOUT):
-                response = await session_stream.receive()
+            # Verify the response
+            assert response.id == request_id
+            assert response.result is not None
+            assert "message" in response.result
             
-            # Verify we got a response
-            assert response is not None, "Timeout waiting for response"
+            # The responder prepends "Echo: " to the message
+            expected_message = f"Echo: {test_params['message']}"
+            assert response.result["message"] == expected_message
             
-            # Log and validate the response
-            logger.info(f"Received response: {response}")
-            
-            # Verification
-            assert response.id == request.id, f"Response ID mismatch: {response.id} != {request.id}"
-            assert hasattr(response, "result"), f"Response has no result field: {response}"
-            assert response.result is not None, "Response result is None"
-            assert "message" in response.result, f"Response result has no message: {response.result}"
-            assert response.result["message"] == f"Echo: {request.params['message']}", \
-                f"Response message mismatch: {response.result['message']}"
-            
-            logger.info("Response verified successfully")
+            logger.info(f"Test completed successfully with response: {response}")
+    
     finally:
-        # Clean up the stderr task
+        # Clean up stderr logger
         if stderr_task:
-            for task in stderr_task:
-                if not task.done():
-                    task.cancel()
+            stderr_task.cancel()
             try:
-                for task in stderr_task:
-                    with anyio.move_on_after(1.0):
-                        await task
+                await asyncio.wait_for(stderr_task, timeout=1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
 
@@ -114,53 +108,81 @@ async def test_bridge_initialization(simple_responder_process):
     stderr_task = await setup_stderr_logger(simple_responder_process)
     
     try:
-        # Bridge the stdio process using our bridge function
-        session_id = "test-init-bridge"
+        # Bridge the stdio process
+        session_id = f"test-init-{uuid.uuid4()}"
+        logger.info(f"Starting initialization test with session ID: {session_id}")
+        
         async with bridge_stdio_to_anyio_session(
-            simple_responder_process, session_id, timeout=5
+            simple_responder_process, session_id, timeout=OPERATION_TIMEOUT
         ) as session_stream:
-            # Create a test initialization request
-            init_request = JSONRPCRequest(
-                jsonrpc="2.0",
-                id="test-init-1",
-                method="initialize",
-                params={}
+            # Use the helper function to initialize the session
+            init_success = await initialize_session(
+                stream=session_stream,
+                timeout=OPERATION_TIMEOUT
             )
             
-            # Send the initialization request
-            logger.info(f"Sending initialize request through bridge: {init_request}")
-            with anyio.move_on_after(OPERATION_TIMEOUT):
-                await session_stream.send(init_request)
+            # Verify initialization succeeded
+            assert init_success, "Session initialization should succeed"
             
-            # Wait for a response
-            logger.info("Waiting for initialization response...")
-            response = None
-            with anyio.move_on_after(OPERATION_TIMEOUT):
-                response = await session_stream.receive()
-            
-            # Verify we got a response
-            assert response is not None, "Timeout waiting for initialization response"
-            
-            # Log and validate the response
-            logger.info(f"Received initialization response: {response}")
-            
-            # Verification
-            assert response.id == init_request.id, f"Response ID mismatch: {response.id} != {init_request.id}"
-            assert hasattr(response, "result"), f"Response has no result field: {response}"
-            assert response.result is not None, "Response result is None"
-            assert "serverInfo" in response.result, f"Response result has no serverInfo: {response.result}"
-            
-            logger.info(f"Server info: {response.result['serverInfo']}")
+            logger.info("Initialization test completed successfully")
+    
     finally:
-        # Clean up the stderr task
+        # Clean up stderr logger
         if stderr_task:
-            for task in stderr_task:
-                if not task.done():
-                    task.cancel()
+            stderr_task.cancel()
             try:
-                for task in stderr_task:
-                    with anyio.move_on_after(1.0):
-                        await task
+                await asyncio.wait_for(stderr_task, timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_full_session_lifecycle(simple_responder_process):
+    """Test a complete session lifecycle with initialization, request, and shutdown."""
+    # Set up stderr logging
+    stderr_task = await setup_stderr_logger(simple_responder_process)
+    
+    try:
+        # Bridge the stdio process
+        session_id = f"test-lifecycle-{uuid.uuid4()}"
+        logger.info(f"Starting lifecycle test with session ID: {session_id}")
+        
+        async with bridge_stdio_to_anyio_session(
+            simple_responder_process, session_id, timeout=OPERATION_TIMEOUT
+        ) as session_stream:
+            # 1. Initialize the session
+            init_success = await initialize_session(
+                stream=session_stream,
+                timeout=OPERATION_TIMEOUT
+            )
+            assert init_success, "Session initialization should succeed"
+            
+            # 2. Send an echo request
+            echo_response = await request_response(
+                stream=session_stream,
+                method="test/echo",
+                params={"message": "Testing full lifecycle"},
+                timeout=OPERATION_TIMEOUT
+            )
+            assert echo_response.result is not None
+            assert echo_response.result["message"] == "Testing full lifecycle"
+            
+            # 3. Send a shutdown request
+            shutdown_response = await request_response(
+                stream=session_stream,
+                method="shutdown",
+                timeout=OPERATION_TIMEOUT
+            )
+            assert shutdown_response.result is not None
+            
+            logger.info("Lifecycle test completed successfully")
+    
+    finally:
+        # Clean up stderr logger
+        if stderr_task:
+            stderr_task.cancel()
+            try:
+                await asyncio.wait_for(stderr_task, timeout=1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
 
